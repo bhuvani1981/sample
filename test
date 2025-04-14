@@ -1,156 +1,342 @@
-name: build-ars-web
+ - name: deployARSWeb | Get archive from github
+      include_tasks: ../tasks/getGITHUBArtifact.yml
+      when: not deployment_filename.startswith("frontend")
+ 
+    - name: deployARSWeb | Get archive from buildartifacts
+      include_tasks: ../tasks/sparse_checkout.yml
+      vars:
+        github_repo_name: "ars-build-artifacts"
+        sparse_checkout: "{{ deployment_filename }}"
+        base_dir: "/opt/tmp"
+      when: deployment_filename.startswith("frontend")
 
-# Controls when the action will run.
-on:
-  push:
-    branches-ignore:
-      - 'gh_pages'
-    tags-ignore:
-      - '*.*' # We don't want this to run on release
-    paths-ignore:
-      - '**.md'
-  pull_request:
-    # The branches below must be a subset of the branches above
-    branches: [ develop,'Release-*' ]
-    paths-ignore:
-      - '**.md'
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-    inputs:
-      scope:
-        type: choice
-        description: What type of release
-        required: true
-        default: "patch"
-        options:
-          - major
-          - minor
-          - patch
-permissions:
-  id-token: write
-  contents: write
-  actions: write
-env:
-  APP_PROJ_NAME: 'ars-web'
-  scope: "${{ github.event.inputs.scope }}"
+    - name: deployARSWeb | Inspect {{ deployment_filename }}
+      shell: |
+        set -o pipefail
+        unzip -l {{ archive_name.dest }} | grep .tar.gz | wc -l
+      register: unzip_content 
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
-jobs:
-  build:
-    name: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      matrix:
-        include:
-          - node-version: 20.x
-            experimental: false
-    continue-on-error: ${{ matrix.experimental }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: deployARSWeb | Unarchive {{ deployment_filename }}
+      unarchive:
+        src: "{{ archive_name.dest }}"
+        dest: "{{ local_stage_path }}"
+        remote_src: true
+      delegate_to: "{{ inventory_hostname }}"
+      register: unarchive_file
+      when: unzip_content.stdout | int > 1
 
-      - name: Set Branch
-        id: get_branch
-        run: |
-          if ${{ github.event_name == 'pull_request' }}
-          then
-            echo "BRANCH_NAME=${GITHUB_HEAD_REF}" >> $GITHUB_ENV
-          else
-            echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
-          fi
-          echo "COMMIT_ID=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_ENV
-          echo "BUILD_ID=$(echo ${GITHUB_RUN_NUMBER})" >> $GITHUB_ENV
-          # Fetch all tags and sort them using version numer
-          # Extract only the version portion and remove any trailing text
-          git fetch --tags
-          echo "latest_release_tag=$(git tag -l | sort -V | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | tail -n1 | sed -E 's/^v//; s/[^0-9.].*$//')" >> $GITHUB_ENV
-          echo "TIMESTAMP=$(date "+%s")" >> ${GITHUB_ENV}
+    - name: deployARSWeb | Copy {{ deployment_filename }} to {{ local_stage_path }}
+      copy:
+        src: "{{ archive_name.dest }}"
+        dest: "{{ local_stage_path }}"
+        remote_src: true
+      delegate_to: "{{ inventory_hostname }}"
+      register: war_contents
+      when: unzip_content.stdout | int < 2
 
-      - name: Output Variables
-        run: |
-          echo GitHub REF is ${GITHUB_REF}
-          echo branch name is $BRANCH_NAME
-          echo commit ID is $COMMIT_ID
-          echo TimeStamp is $TIMESTAMP
-          echo latest_release_tag is $latest_release_tag
-          echo BUILD_ID is $BUILD_ID
+    - name: deployARSWeb | Determine if there is an existing release
+      stat:
+        path: "{{ release_path }}"
+      register: ars_stat
 
-      - name: Setup Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
+    - name: deployARSWeb | Create backup of existing release
+      synchronize:
+        src: "{{ release_path }}"
+        dest: "{{ ars_backup }}"
+        recursive: yes
+        perms: yes
+        owner: true
+        group: true
+        rsync_path: "sudo rsync" #use sudo on the remote systems
+      delegate_to: "{{ inventory_hostname }}"
+      when: ars_stat.stat.exists
 
-      - name: Set Environment variable to get next release version
-        run: |
-          scope=${scope:-patch}
-          echo "scope: ${scope}"
-          if [ "$scope" == "major" ]; then
-            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
-            major_version="${version_parts[0]}"
-            next_version="$((major_version +1)).0.0" >> $GITHUB_ENV
-          elif [ "$scope" == "minor" ]; then
-            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
-            major_version="${version_parts[0]}"
-            minor_version="${version_parts[1]}"
-            next_version="$major_version.$((minor_version +1)).0" >> $GITHUB_ENV
-          else
-            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
-            major_version="${version_parts[0]}"
-            minor_version="${version_parts[1]}"
-            patch_version="${version_parts[2]}"
-            next_version="$major_version.$minor_version.$((patch_version +1))"
-          fi
-          echo "next_release_version=$next_version" >> $GITHUB_ENV
+    - name: deployARSWeb | Ensure "{{ release_path }}" exists
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ars_default_user_name }}"
+        group: "{{ ars_default_user_group }}"
+        mode: 0750
+      with_items:
+        - "{{ release_path }}"
+      when: not ars_stat.stat.exists
 
-      - name: Set Release version variable and Retag packageVersion for branch
-        run: |
-          echo "RELEASE_VERSION=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}.tar.gz" >> $GITHUB_ENV
-          if [[ "$BRANCH_NAME" != "master" && "$BRANCH_NAME" != "develop" ]]; then
-            echo "RELEASE_VERSION=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}-${{env.BRANCH_NAME}}.tar.gz" >> $GITHUB_ENV
-          fi
+    - name: deployARSWeb | Extract tar to  {{ release_path }}
+      command: "tar -xvf {{ local_stage_path }}/{{ deployment_tar_file.split('/')[-1] }} -C {{ release_path }}/"
+      when: unzip_content.stdout | int > 1
+      tags:
+        - skip_ansible_lint
 
-      - name: create metadata
-        run: |
-          current_date=$(date +%y%m%d_%H%M%S)
-          echo "appName=$APP_PROJ_NAME" >> $GITHUB_ENV
-          echo "distributionFileName=$RELEASE_VERSION" >> $GITHUB_ENV
-          echo "lastBuildDate=$current_date"  >> $GITHUB_ENV
-          echo "version=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}" >> $GITHUB_ENV
+    - name: deployARSWeb | Synchronize app source
+      synchronize:
+        src: "{{ tmp_path }}/"
+        dest: "{{ release_path }}/"
+        recursive: yes
+        owner: no
+        group: no
+        delete: yes
+        rsync_path: "sudo rsync" #use sudo on the remote systems
+      delegate_to: "{{ inventory_hostname }}"
+      when: unzip_content.stdout | int < 2
 
-      # this is a hack until they fix the frontend to read the environment.json file
-      - name: Update index.html, version.ts
-        run: |
-          sed -i "2 i\<meta name=\"distributionFileName\" content=\"${{env.RELEASE_VERSION}}\"\>" ./src/index.html
-          sed -i "2 i\<meta name=\"lastBuildDate\" content=\"${{env.lastBuildDate}}\"\>" ./src/index.html
-          sed -i "2 i\<meta name=\"version\" content=\"${{env.version}}\"\>" ./src/index.html
-          touch src/version.ts
-          echo "export const version = { version: '${{env.version}}' };" > src/version.ts
-          cat src/version.ts
+    - name: deployARSWeb | Add proxy location files to the httpd conf.d directory
+      template:
+        src: "../templates/ars/{{ item }}"
+        dest: "/etc/httpd/conf.d/{{ item | basename | regex_replace ('.j2$','') }}"
+        mode: 0644
+        backup: yes
+      notify: reload_httpd
+      loop:
+        - ars-web.vhost.conf.j2
+        - ars-nodeapi.vhost.conf.j2
+      tags:
+        - skip_ansible_lint
 
-      - name: Run npm clean
-        run: npm cache clean --force
+    - name: deployARSWeb | Get ARS Site Meta Data
+      command: cat "{{ release_path }}/index.html"
+      register: index_meta_data
+      tags: find_meta
+      changed_when: false
 
-      - name: Run npm install
-        run: npm install
+    - name: deployARSWeb | Set distributionVersionDeployed
+      set_fact:
+        distributionVersionDeployed: "{{ index_meta_data.stdout | regex_search(regexp, '\\1')| regex_replace('\\s+','') }}"
+      vars:
+        regexp: '<meta name=\"version\"\s+content=\"([^>]+)\"'
+      tags:
+        - skip_ansible_lint
+        - find_meta
 
-      - name: Run npm build
-        run: npm run cibuild
+    - name: deployARSWeb | Set distributionFileDeployed
+      set_fact:
+        distributionFileDeployed: "{{ index_meta_data.stdout | regex_search(regexp, '\\1') }}"
+      vars:
+        regexp: '<meta name=\"distributionFileName\"\s+content=\"([^>]+)\"'
+      tags: find_meta
 
-      - name: Run npm test with coverage
-        run: npm run test-cc
+    - name: deployARSWeb | Set lastBuildDate
+      set_fact:
+        lastBuildDate: "{{ index_meta_data.stdout | regex_search(regexp, '\\1') }}"
+      vars:
+        regexp: '<meta name=\"lastBuildDate\"\s+content=\"([^>]+)\"'
+      tags: find_meta
 
-      - name: Show coverage directory
-        run: find . -type d -name coverage -exec echo {} \; -exec ls -al {} \;
-        if: always()
+    - name: deployARSWeb | Output meta
+      debug:
+        msg: "{{ distributionVersionDeployed }}, {{ distributionFileDeployed }}, {{ lastBuildDate }}"
+      tags: find_meta
 
-      - name: Prepare Package
-        run: |
-          tar czf ${{ env.RELEASE_VERSION }} -C ${{ github.workspace }}/dist/ .
+    - name: deployARSWeb | Update ARS env files
+      template:
+        src: "../templates/ars/{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: 0644
+        owner: "{{ ars_default_user_name }}"
+        group: "{{ ars_default_user_group }}"
+        backup: yes
+      delegate_to: "{{ inventory_hostname }}"
+      with_items:
+        - src: "{{ app_name }}.environment.json.j2"
+          dest: "{{ release_path }}/assets/config/environment.json"
+        - src: "{{ app_name }}.htaccess.j2"
+          dest: "{{ release_path }}/assets/.htaccess"
 
-      - name: Upload the Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.RELEASE_VERSION }}_NODE${{ matrix.node-version }}
-          path: ${{ github.workspace }}/${{ env.RELEASE_VERSION }}
+    - name: deployARSWeb | Check if aws cw agent path exists
+      stat:
+        path: "{{ aws_cwagent_install_path }}"
+      register: aws_cwagent_present
 
+    - name: deployARSWeb | Update Cloudwatch Agent files
+      template:
+        src: "../templates/ars/{{ app_name }}-cwagent-logs.json.j2"
+        dest: "{{ aws_cwagent_install_path }}/etc/{{ app_name }}-cwagent-logs.json"
+        mode: 0755
+        owner: "root"
+        group: "root"
+      delegate_to: "{{ inventory_hostname }}"
+      failed_when: false
+      when: aws_cwagent_present.stat.exists
+
+    ###############################################
+    ### append configure cloudwatch agent to ship logs ###
+    ###############################################
+    - name: deployARSWeb | Append the new config to start command
+      command: >
+        {{ aws_cwagent_ctl }}
+        -a append-config -m {{ aws_cwagent_mode }}
+        -c file:'{{ aws_cwagent_install_path }}/etc/{{ app_name }}-cwagent-logs.json'
+        -s
+      notify: get_cwagent_status
+      when: aws_cwagent_present.stat.exists
+
+    - name: deployARSWeb | Make {{ release_path }} tree readable
+      file:
+        path: "{{ release_path }}"
+        mode: 0755
+        owner: "{{ ars_default_user_name }}"
+        group: "{{ ars_default_user_group }}"
+        recurse: yes
+
+    - name: deployARSWeb | Make {{ ars_default_user_home }} tree readable by apache
+      acl:
+        path: "{{ ars_default_user_home }}"
+        entity: apache
+        etype: user
+        permissions: rx
+        state: present
+        recursive: yes
+
+    - name: deployARSWeb | Ensure we start with a clean SELinux file context of {{ release_path }}
+      community.general.sefcontext:
+        path: '{{ release_path }}(/.*)?'
+        setype: httpd_sys_content_t
+        state: absent
+
+    - name: deployARSWeb | Set SELinux file context of {{ release_path }}
+      community.general.sefcontext:
+        path: '{{ release_path }}(/.*)?'
+        setype: httpd_sys_content_t
+        state: present
+        reload: yes
+      register: content
+
+    - name: deployARSWeb | Reload_selinux
+      command: restorecon -Rv {{ item }}
+      with_items:
+      - "{{ release_path }}"
+      changed_when: false
+
+    - name: deployARSWeb | Verify index page on site
+      uri:
+        url: "{{ ars_site_url }}"
+        status_code: 200
+        validate_certs: false
+        return_content: yes
+      register: site_index
+      tags: find_meta
+      until: site_index is not failed
+      retries: 30
+      delay: 15
+      changed_when: true
+
+    - name: deployARSWeb | Is site being redirected to PIV
+      debug:
+        msg: "site is redireced to PIV login {{ site_index.redirected }}"
+      tags: find_meta
+
+    - name: deployARSWeb | URL of site query
+      debug:
+        msg: "site url returned {{ site_index.url }}"
+      tags: find_meta
+
+    - name: deployARSWeb | Parse our site from string if redirected
+      set_fact:
+        site_url: "{{ site_index.url | regex_replace(regexp, '\\1://\\3.\\4.\\5/') }}"
+      vars:
+        regexp: '.*TARGET=.*(http[s]*)(%.{2}){3}(.*)%.{2}(.*)%.{2}(.*)%.{2}.*'
+      when: site_index.redirected
+      tags: find_meta
+
+    - name: deployARSWeb | Parse our site from string if not redirected
+      set_fact:
+        site_url: "{{ site_index.url }}"
+      when: not site_index.redirected
+      tags: find_meta
+
+    - name: deployARSWeb | Get the username running the deploy
+      command: whoami
+      register: username_on_the_host
+      changed_when: False
+      become: no
+      delegate_to: localhost
+      tags: find_meta
+
+    - name: deployARSWeb | Update server deployment history
+      lineinfile:
+        dest: "/var/log/deployments/{{ app_name }}_{{ env }}_deploymentHistory.log"
+        line: >
+          "{{ site_index.date }},
+          {{ username_on_the_host.stdout }},
+          {{ site_url }},
+          {{ distributionVersionDeployed[0] }},
+          {{ distributionFileDeployed[0] }}"
+        create: yes
+        insertafter: EOF
+        state: present
+        mode: 0644
+      tags: find_meta
+
+    - name: deployARSWeb | Send Email to users
+      community.general.mail:
+        subject: "Deployment completed for ARS WEB {{ env | upper }}"
+        body: "{{ lookup('template', '../templates/ars/deployment_notification_body.j2') }}"
+        from: jenkins@{{ inventory_hostname }} (AWS Automation)
+        to: "{{ ars_fe_notification_list }}"
+        cc:
+          - "{{ default_reply_email }}"
+        headers:
+          - Reply-To="{{ default_reply_email }}"
+          - X-Special="Notification for deployment"
+        subtype: html
+      vars:
+        paragraph1: "Deployment env: {{ friendly_env }}"
+        paragraph2: |
+           Deployed Date: {{ date_string }}<br>
+           URL: {{ ars_webui_url }}<br>
+           Status: {{ site_index.status }}<br>
+           Last Build Date: {{ lastBuildDate[0] }}<br>
+           Distribution Version: {{ distributionVersionDeployed[0] }}<br>
+           Distribution File Deployed: {{ distributionFileDeployed[0] }}<br>
+      failed_when: false
+      tags: skip_ansible_lint
+
+    - name: deployARSWeb | Cleanup unarchived files
+      file:
+        path: "{{ tmp_path }}"
+        state: absent
+
+    - name: deployARSWeb | Collect list of backups elibible for cleanup
+      shell: |
+        set -o pipefail;
+        ls -t {{ backup_path }} | grep {{ app_name }}_bkp_ | tail -n +{{ backup_to_keep + 1 }}
+      register: ls_output
+      become: true
+      changed_when: false
+      failed_when: ls_output.rc > 1
+
+    - name: deployARSWeb | Remove backups eligible for cleanup
+      file:
+        path: "{{ backup_path }}/{{ item }}"
+        state: absent
+      with_items: "{{ ls_output.stdout_lines }}"
+      become: true
+      when:
+        - ls_output.stdout_lines is defined
+        - ls_output.stdout_lines | length > 0
+
+  handlers:
+    - name: reload_httpd
+      systemd:
+        name: httpd
+        state: reloaded
+        enabled: yes
+        daemon_reload: true
+
+    - name: get_cwagent_status
+      command: >
+        {{ aws_cwagent_install_path }}/bin/{{ aws_cwagent_package }}-ctl
+        -m ec2
+        -a status
+      register: cwagent_status
+      failed_when: >
+        cwagent_status.rc > 0 or
+        'running' not in cwagent_status.stdout
+      notify: print_cwagent_status
+
+    - name: print_cwagent_status
+      debug:
+        msg: "{{ cwagent_status.stdout }}"
+      when:
+        - cwagent_status.stdout is defined
+        - cwagent_status.stdout | length > 0
