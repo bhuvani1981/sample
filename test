@@ -100,4 +100,28 @@
         git push origin {{ target_branch | default('master') }} --tags
 
 
+ for _role in "${roles[@]}"
+        do
+          role="${_role// /}"
+          branch_var=${role}_branch
+          git_hash=''
+          if [[ -n "${!branch_var}" ]]; then
+            echo "${branch_var} branch: ${!branch_var}"
+            git clone $DOVA_GH/ansible-role-$role --branch "${!branch_var}" "$CODEBUILD_SRC_DIR/roles/ansible-role-$role";
+          else
+            git clone $DOVA_GH/ansible-role-$role "$CODEBUILD_SRC_DIR/roles/ansible-role-$role";
+          fi
+          pwd
+          pushd "$CODEBUILD_SRC_DIR/roles/ansible-role-$role"
+          git_hash=$(git rev-parse HEAD | cut -c 1-7)
+          ar_versions[$role]=$git_hash
+          popd
+          pwd
+          echo "ansible-role-$role, commit id $git_hash"
+        done
+        for key in "${!ar_versions[@]}"; do
+           ansible_role_versions+=$(echo "$key: ${ar_versions[$key]},")
+        done
+        export ansible_role_versions=${ansible_role_versions%,}
+
 
