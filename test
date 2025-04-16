@@ -1,3 +1,33 @@
-
+- name: promoteBuildArtifact | Filter matching candidate tags
+  set_fact:
+    matching_candidate_tags: >-
+      {{
+        git_tags.stdout_lines
+        | select('search', tag_name + '_candidate\\d+')
+        | list
+      }}
+  when: app_env in ['prep']
+Step 2: Extract candidate numbers
+yaml
+Copy
+Edit
+- name: promoteBuildArtifact | Extract candidate numbers
+  set_fact:
+    candidate_numbers: >-
+      {{
+        matching_candidate_tags
+        | map('regex_search', '_candidate(\\d+)', '\\1')
+        | map('int')
+        | list
+      }}
+  when: app_env in ['prep']
+Step 3: Set next candidate number
+yaml
+Copy
+Edit
+- name: promoteBuildArtifact | Determine next candidate number
+  set_fact:
+    candidate_number: "{{ (candidate_numbers | default([-1]) | max) + 1 }}"
+  when: app_env in ['prep']
 
 
