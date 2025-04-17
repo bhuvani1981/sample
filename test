@@ -1,1 +1,23 @@
+- name: promoteBuildArtifact | Init empty directory
+  ansible.builtin.file:
+    path: "{{ destination_directory }}/{{ github_repo_name }}"
+    state: directory
+    mode: 0750
 
+- name: promoteBuildArtifact | Initialize empty git repo
+  ansible.builtin.shell: |
+    git init
+    git remote add origin {{ destination_repo }}
+  args:
+    chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+  tags:
+    - skip_ansible_lint
+
+- name: promoteBuildArtifact | Fetch and checkout only target branch
+  ansible.builtin.shell: |
+    git fetch --depth 1 origin {{ target_branch }}
+    git checkout -b {{ target_branch }} FETCH_HEAD
+  args:
+    chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+  tags:
+    - skip_ansible_lint
