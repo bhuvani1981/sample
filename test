@@ -1,19 +1,1 @@
-- name: promoteBuildArtifact | Clone develop branch first (base clone)
-  ansible.builtin.git:
-    repo: "{{ destination_repo }}"
-    dest: "{{ destination_directory }}/{{ github_repo_name }}/"
-    version: develop
-    accept_hostkey: yes
-    clone: yes
-    update: yes
-    force: yes
-
-- name: promoteBuildArtifact | Fetch and checkout target branch
-  ansible.builtin.shell: |
-    git fetch origin {{ target_branch }}
-    git checkout -B {{ target_branch }} origin/{{ target_branch }}
-  args:
-    chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-  tags:
-    - skip_ansible_lint
 
