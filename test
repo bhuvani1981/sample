@@ -1,31 +1,34 @@
- # Clone repo with default branch first, without specifying a specific branch/revision
-    - name: promoteBuildArtifact | Clone build artifact repo (default branch)
-      ansible.builtin.git:
-        repo: "{{ destination_repo }}"
-        dest: "{{ destination_directory }}/{{ github_repo_name }}/"
-        accept_hostkey: yes
-        
-    - name: promoteBuildArtifact | Fetch all branches and tags
-      ansible.builtin.command: git fetch --all --tags
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      tags:
-        - skip_ansible_lint
+  # Fix for the template error - simplified approach
+    - name: promoteBuildArtifact | Extract candidate numbers
+      ansible.builtin.set_fact:
+        candidate_numbers: []
+      when: app_env in ['prep']
 
-    - name: promoteBuildArtifact | Check if target branch exists remotely
-      ansible.builtin.command: git ls-remote --heads origin {{ target_branch }}
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      register: remote_branch_check
-      changed_when: false
-      tags:
-        - skip_ansible_lint
+    - name: promoteBuildArtifact | Process tags for candidate numbers
+      ansible.builtin.set_fact:
+        candidate_match: "{{ item | regex_search(tag_name + '_candidate(\\d+)', '\\1') }}"
+        candidate_numbers: "{{ candidate_numbers + [candidate_match | int] }}"
+      when: 
+        - app_env in ['prep'] 
+        - item is match(tag_name + '_candidate\\d+')
+        - item | regex_search(tag_name + '_candidate(\\d+)', '\\1') != ''
+      loop: "{{ git_tags.stdout_lines }}"
+      loop_control:
+        label: "{{ item }}"
 
-    - name: promoteBuildArtifact | Checkout target branch if it exists remotely
-      ansible.builtin.command: git checkout -B {{ target_branch }} origin/{{ target_branch }}
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      when: remote_branch_check.stdout != ""
-      tags:
-        - skip_ansible_lint
-     
+    - name: promoteBuildArtifact | Set default candidate number if no matches
+      ansible.builtin.set_fact:
+        candidate_numbers: [0]
+      when: 
+        - app_env in ['prep']
+        - candidate_numbers | length == 0
+
+    - name: promoteBuildArtifact | Determine next candidate number
+      ansible.builtin.set_fact:
+        candidate_number: "{{ (candidate_numbers | max) + 1 }}"
+      when: app_env in ['prep']
+
+    - name: promoteBuildArtifact | Set candidate suffix and release tag
+      set_fact:
+        candidate_suffix: "{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number, '') }}"
+        release_tag: "{{ tag_name }}{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number, '') }}"
