@@ -1,57 +1,10 @@
----
-- name: Test | Clone build artifact repo
-  hosts: "{{ var_hosts }}"
-  become: true
-  roles:
-    - ansible-role-awscli
-  vars:
-    github_repo_name: "ars-build-artifacts"
-    destination_directory: "/opt/tmp"
-    build_user: "{{ lookup('ansible.builtin.env', 'BUILDUSER') }}"
-    build_token: "{{ lookup('ansible.builtin.env', 'BUILDTOKEN') }}"
-    target_branch: PEDI-33881_staging_artifact_testing
-    no_log_value: true
-
-  pre_tasks:
-    - name: promoteBuildArtifact | Include all files in vars
-      include_vars:
-        dir: ../vars/ars-defaults
-        extensions:
-          - yml
-
-    - name: promoteBuildArtifact | Include playbook pre tasks
-      include_tasks: ../tasks/playbookPreTasks.yml
-
-  tasks:
-    - name: promoteBuildArtifact | Reset no log if verbosity is high enough
-      set_fact:
-        no_log_value: false
-      when: ansible_verbosity >= 3
-
-    - name: promoteBuildArtifact | Set facts for checkout
-      set_fact:
-        destination_repo: "https://{{ build_user }}:{{ build_token }}@github.com/department-of-veterans-affairs/{{ github_repo_name }}"
-
-    - name: promoteBuildArtifact | Set default facts
-      set_fact:
-        files_to_release: "{{ lookup('ansible.builtin.env', 'files_to_release') }}"
-        tag_name: "{{ lookup('ansible.builtin.env', 'tag_name') }}"
-        app_env: "{{ lookup('ansible.builtin.env', 'app_env') | default('unknown') }}"
-
-    - name: promoteBuildArtifact | Create dir to clone
-      ansible.builtin.file:
-        path: "{{ destination_directory }}"
-        state: directory
-        mode: 0750
-
-    - name: promoteBuildArtifact | Clone build artifact repo
+ # Clone repo with default branch first, without specifying a specific branch/revision
+    - name: promoteBuildArtifact | Clone build artifact repo (default branch)
       ansible.builtin.git:
         repo: "{{ destination_repo }}"
         dest: "{{ destination_directory }}/{{ github_repo_name }}/"
         accept_hostkey: yes
-        clone: yes
-        update: yes
-
+        
     - name: promoteBuildArtifact | Fetch all branches and tags
       ansible.builtin.command: git fetch --all --tags
       args:
@@ -59,82 +12,20 @@
       tags:
         - skip_ansible_lint
 
-    - name: promoteBuildArtifact | Check if target branch exists
-      ansible.builtin.command: git rev-parse --verify origin/{{ target_branch }}
+    - name: promoteBuildArtifact | Check if target branch exists remotely
+      ansible.builtin.command: git ls-remote --heads origin {{ target_branch }}
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      register: branch_check
-      ignore_errors: yes
+      register: remote_branch_check
       changed_when: false
       tags:
         - skip_ansible_lint
 
-    - name: promoteBuildArtifact | Checkout target branch if it exists
-      ansible.builtin.command: git checkout {{ target_branch }}
+    - name: promoteBuildArtifact | Checkout target branch if it exists remotely
+      ansible.builtin.command: git checkout -B {{ target_branch }} origin/{{ target_branch }}
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      when: branch_check is succeeded
+      when: remote_branch_check.stdout != ""
       tags:
         - skip_ansible_lint
-
-    - name: promoteBuildArtifact | Create and checkout target branch if it doesn't exist
-      ansible.builtin.command: git checkout -b {{ target_branch }}
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      when: branch_check is failed
-      tags:
-        - skip_ansible_lint
-
-    - name: promoteBuildArtifact | Get existing tags
-      ansible.builtin.command: git tag
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      register: git_tags
-
-    - name: promoteBuildArtifact | Determine next candidate number
-      set_fact:
-        candidate_number: >-
-          {{ ( git_tags.stdout_lines | select('match', tag_name + r'_candidate\d+') | 
-               map('regex_search', '_candidate(\\d+)', '\\1') | 
-               map('int') | list | default([0]) | max + 1 ) }}
-      when: app_env in ['prep']
-
-    - name: promoteBuildArtifact | Set candidate suffix and release tag
-      set_fact:
-        candidate_suffix: "{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number, '') }}"
-        release_tag: "{{ tag_name }}{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number, '') }}"
-
-    - name: promoteBuildArtifact | Fetch latest develop branch
-      ansible.builtin.command: git fetch origin develop
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      tags:
-        - skip_ansible_lint
-
-    - name: promoteBuildArtifact | Checkout specific files from develop to target branch
-      ansible.builtin.shell: git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      loop: "{{ files_to_release }}"
-      tags:
-        - skip_ansible_lint
-
-    - name: promoteBuildArtifact | Check for changes
-      ansible.builtin.command: git status --porcelain
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      register: git_status
-      changed_when: false
-      tags:
-        - skip_ansible_lint
-
-    - name: promoteBuildArtifact | Commit and push promoted artifacts to target branch
-      ansible.builtin.shell: |
-        cd "{{ destination_directory }}/{{ github_repo_name }}"
-        git add .
-        git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
-        git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
-        git push origin {{ target_branch }} --tags
-      when: git_status.stdout != ""
-      tags:
-        - skip_ansible_lint
+     
