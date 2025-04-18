@@ -1,42 +1,92 @@
- - name: promoteBuildArtifact | Initialize or update git repo
-   ansible.builtin.shell: |
-        if [ ! -d .git ]; then
-          git init
-        fi
-        git remote -v | grep -q origin || git remote add origin {{ destination_repo }}
+---
+- name: Test | Clone build artifact repo
+  hosts: "{{ var_hosts }}"
+  become: true
+  roles:
+    - ansible-role-awscli
+  vars:
+    github_repo_name: "ars-build-artifacts"
+    destination_directory: "/opt/tmp"
+    build_user: "{{ lookup('ansible.builtin.env', 'BUILDUSER') }}"
+    build_token: "{{ lookup('ansible.builtin.env', 'BUILDTOKEN') }}"
+    target_branch: PEDI-33881_staging_artifact_testing
+    no_log_value: "{{ ansible_verbosity < 3 }}"
+    destination_repo: "https://{{ build_user }}:{{ build_token }}@github.com/department-of-veterans-affairs/{{ github_repo_name }}"
+    files_to_release: "{{ lookup('ansible.builtin.env', 'files_to_release') }}"
+    tag_name: "{{ lookup('ansible.builtin.env', 'tag_name') }}"
+    app_env: "{{ lookup('ansible.builtin.env', 'app_env') | default('unknown') }}"
+
+  pre_tasks:
+    - name: Include vars and pre-tasks
+      block:
+        - include_vars:
+            dir: ../vars/ars-defaults
+            extensions: ['yml']
+        - include_tasks: ../tasks/playbookPreTasks.yml
+
+  tasks:
+
+    - name: Ensure destination directory exists
+      ansible.builtin.file:
+        path: "{{ destination_directory }}/{{ github_repo_name }}"
+        state: directory
+        mode: '0750'
+
+    - name: Initialize and checkout target branch
+      ansible.builtin.shell: |
+        git init
+        git remote add origin {{ destination_repo }} 2>/dev/null || true
         git fetch origin
-        git checkout -f $(git rev-parse --verify origin/master 2>/dev/null || git rev-parse --verify origin/main 2>/dev/null || echo "HEAD")
+        git checkout -f $(git rev-parse --verify origin/master 2>/dev/null || \
+                          git rev-parse --verify origin/main 2>/dev/null || echo "HEAD")
         git branch -D {{ target_branch }} 2>/dev/null || true
-        git checkout -b {{ target_branch }} 2>/dev/null || git checkout {{ target_branch }}
+        git checkout -b {{ target_branch }} || git checkout {{ target_branch }}
         git fetch --tags
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}"
       tags: [skip_ansible_lint]
 
-    - name: promoteBuildArtifact | Get existing tags
+    - name: Get existing git tags
       ansible.builtin.command: git tag
       args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
       register: git_tags
+      changed_when: false
 
+    - name: Determine candidate suffix and release tag
+      set_fact:
+        candidate_suffix: "{{ '_candidate' + ((git_tags.stdout_lines |
+                          select('match', tag_name + '_candidate\\d+') |
+                          map('regex_search', '_candidate(\\d+)', '\\1') |
+                          map('int') | list | default([0]) | max + 1) | string) if app_env == 'prep' else '' }}"
+        release_tag: "{{ tag_name + candidate_suffix }}"
 
-    - name: promoteBuildArtifact | Set candidate number and tags
+    - name: Checkout files from develop branch
       ansible.builtin.shell: |
-        candidate_tags=$(echo "{{ git_tags.stdout }}" | grep "{{ tag_name }}_candidate" | sort -V)
-        if [ -z "$candidate_tags" ]; then
-          echo "1"
-        else
-          last_num=$(echo "$candidate_tags" | tail -1 | sed -E 's/.*_candidate([0-9]+)$/\1/')
-          echo "$((last_num + 1))"
-        fi
+        git fetch origin develop
+        git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }} || true
       args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      register: candidate_number_result
-      when: app_env in ['prep']
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      loop: "{{ files_to_release }}"
+      loop_control:
+        label: "{{ item.filename }}"
       tags: [skip_ansible_lint]
 
-    - name: promoteBuildArtifact | Set release tag
-      set_fact:
-        candidate_suffix: "{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number_result.stdout, '') }}"
-        release_tag: "{{ tag_name }}{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number_result.stdout, '') }}"
+    - name: Check for changes
+      ansible.builtin.command: git status --porcelain
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      register: git_status
+      changed_when: false
+      tags: [skip_ansible_lint]
 
+    - name: Commit and push promoted artifacts (if any changes)
+      ansible.builtin.shell: |
+        git add .
+        git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
+        git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+        git push origin {{ target_branch }} --tags
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      when: git_status.stdout != ""
+      tags: [skip_ansible_lint]
