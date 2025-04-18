@@ -1,3 +1,36 @@
+ - name: promoteBuildArtifact | Clone build artifact repo (default branch)
+      ansible.builtin.git:
+        repo: "{{ destination_repo }}"
+        dest: "{{ destination_directory }}/{{ github_repo_name }}/"
+        accept_hostkey: yes
+        
+    - name: promoteBuildArtifact | Fetch all branches and tags
+      ansible.builtin.command: git fetch --all --tags
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+      tags:
+        - skip_ansible_lint
+
+    - name: promoteBuildArtifact | Check if target branch exists remotely
+      ansible.builtin.command: git ls-remote --heads origin {{ target_branch }}
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+      register: remote_branch_check
+      changed_when: false
+      tags:
+        - skip_ansible_lint
+
+    - name: promoteBuildArtifact | Checkout target branch if it exists remotely
+      ansible.builtin.command: git checkout -B {{ target_branch }} origin/{{ target_branch }}
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+      when: remote_branch_check.stdout != ""
+      tags:
+        - skip_ansible_lint
+
+
+
+
   # Fix for the template error - simplified approach
     - name: promoteBuildArtifact | Extract candidate numbers
       ansible.builtin.set_fact:
