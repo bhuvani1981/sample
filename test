@@ -53,13 +53,39 @@
       register: git_tags
       changed_when: false
 
-    - name: Determine candidate suffix and release tag
+   - name: Set candidate matching pattern
       set_fact:
-        candidate_suffix: "{{ '_candidate' + ((git_tags.stdout_lines |
-                          select('match', tag_name + '_candidate\\d+') |
-                          map('regex_search', '_candidate(\\d+)', '\\1') |
-                          map('int') | list | default([0]) | max + 1) | string) if app_env == 'prep' else '' }}"
-        release_tag: "{{ tag_name + candidate_suffix }}"
+        candidate_pattern: "{{ tag_name ~ '_candidate\\d+' }}"
+
+    - name: Find matching candidate tags
+      set_fact:
+        matching_tags: "{{ git_tags.stdout_lines | select('match', candidate_pattern) | list }}"
+      when: app_env == 'prep'
+
+    - name: Extract candidate numbers
+      set_fact:
+        candidate_numbers: "{{ matching_tags | map('regex_search', '_candidate(\\d+)', '\\1') | map('int') | list }}"
+      when:
+        - app_env == 'prep'
+        - matching_tags is defined
+        - matching_tags | length > 0
+
+    - name: Determine candidate number
+      set_fact:
+        candidate_number: "{{ (candidate_numbers | max + 1) if candidate_numbers | length > 0 else 1 }}"
+      when: app_env == 'prep'
+
+    - name: Set release tag and candidate suffix
+      set_fact:
+        candidate_suffix: "{{ '_candidate' ~ candidate_number }}"
+        release_tag: "{{ tag_name ~ '_candidate' ~ candidate_number }}"
+      when: app_env == 'prep'
+
+    - name: Set release tag for non-prep
+      set_fact:
+        candidate_suffix: ""
+        release_tag: "{{ tag_name }}"
+      when: app_env != 'prep'
 
     - name: Checkout files from develop branch
       ansible.builtin.shell: |
