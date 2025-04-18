@@ -1,67 +1,42 @@
- - name: promoteBuildArtifact | Clone build artifact repo (default branch)
-      ansible.builtin.git:
-        repo: "{{ destination_repo }}"
-        dest: "{{ destination_directory }}/{{ github_repo_name }}/"
-        accept_hostkey: yes
-        
-    - name: promoteBuildArtifact | Fetch all branches and tags
-      ansible.builtin.command: git fetch --all --tags
+ - name: promoteBuildArtifact | Initialize or update git repo
+   ansible.builtin.shell: |
+        if [ ! -d .git ]; then
+          git init
+        fi
+        git remote -v | grep -q origin || git remote add origin {{ destination_repo }}
+        git fetch origin
+        git checkout -f $(git rev-parse --verify origin/master 2>/dev/null || git rev-parse --verify origin/main 2>/dev/null || echo "HEAD")
+        git branch -D {{ target_branch }} 2>/dev/null || true
+        git checkout -b {{ target_branch }} 2>/dev/null || git checkout {{ target_branch }}
+        git fetch --tags
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      tags: [skip_ansible_lint]
+
+    - name: promoteBuildArtifact | Get existing tags
+      ansible.builtin.command: git tag
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      tags:
-        - skip_ansible_lint
+      register: git_tags
 
-    - name: promoteBuildArtifact | Check if target branch exists remotely
-      ansible.builtin.command: git ls-remote --heads origin {{ target_branch }}
+
+    - name: promoteBuildArtifact | Set candidate number and tags
+      ansible.builtin.shell: |
+        candidate_tags=$(echo "{{ git_tags.stdout }}" | grep "{{ tag_name }}_candidate" | sort -V)
+        if [ -z "$candidate_tags" ]; then
+          echo "1"
+        else
+          last_num=$(echo "$candidate_tags" | tail -1 | sed -E 's/.*_candidate([0-9]+)$/\1/')
+          echo "$((last_num + 1))"
+        fi
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      register: remote_branch_check
-      changed_when: false
-      tags:
-        - skip_ansible_lint
-
-    - name: promoteBuildArtifact | Checkout target branch if it exists remotely
-      ansible.builtin.command: git checkout -B {{ target_branch }} origin/{{ target_branch }}
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
-      when: remote_branch_check.stdout != ""
-      tags:
-        - skip_ansible_lint
-
-
-
-
-  # Fix for the template error - simplified approach
-    - name: promoteBuildArtifact | Extract candidate numbers
-      ansible.builtin.set_fact:
-        candidate_numbers: []
+      register: candidate_number_result
       when: app_env in ['prep']
+      tags: [skip_ansible_lint]
 
-    - name: promoteBuildArtifact | Process tags for candidate numbers
-      ansible.builtin.set_fact:
-        candidate_match: "{{ item | regex_search(tag_name + '_candidate(\\d+)', '\\1') }}"
-        candidate_numbers: "{{ candidate_numbers + [candidate_match | int] }}"
-      when: 
-        - app_env in ['prep'] 
-        - item is match(tag_name + '_candidate\\d+')
-        - item | regex_search(tag_name + '_candidate(\\d+)', '\\1') != ''
-      loop: "{{ git_tags.stdout_lines }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: promoteBuildArtifact | Set default candidate number if no matches
-      ansible.builtin.set_fact:
-        candidate_numbers: [0]
-      when: 
-        - app_env in ['prep']
-        - candidate_numbers | length == 0
-
-    - name: promoteBuildArtifact | Determine next candidate number
-      ansible.builtin.set_fact:
-        candidate_number: "{{ (candidate_numbers | max) + 1 }}"
-      when: app_env in ['prep']
-
-    - name: promoteBuildArtifact | Set candidate suffix and release tag
+    - name: promoteBuildArtifact | Set release tag
       set_fact:
-        candidate_suffix: "{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number, '') }}"
-        release_tag: "{{ tag_name }}{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number, '') }}"
+        candidate_suffix: "{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number_result.stdout, '') }}"
+        release_tag: "{{ tag_name }}{{ (app_env in ['prep']) | ternary('_candidate' ~ candidate_number_result.stdout, '') }}"
+
