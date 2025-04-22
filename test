@@ -62,13 +62,6 @@
         chdir: "{{ destination_directory }}/{{ github_repo_name }}"
       tags: skip_ansible_lint
 
-    - name: promoteBuildArtifact | Set fake git tag list
-      ansible.builtin.set_fact:
-        git_tags:
-          stdout_lines:
-            - "{{ tag_name }}_candidate1"
-            - "{{ tag_name }}_candidate2"
-
     - name: promoteBuildArtifact |  Get existing git tags
       ansible.builtin.command: git tag
       args:
@@ -88,7 +81,7 @@
 
     - name: promoteBuildArtifact | Debug matching tags before extracting numbers
       debug:
-        msg: "Matching tags: {{ matching_tags }}"
+        msg: "Matching tags: {{ matching_tags | default([]) }}"
       when: app_env == 'prep'
 
     # Extract candidate numbers from tags like v2.4.3_candidatex
@@ -104,6 +97,7 @@
           }}
       when: 
         - app_env == 'prep'
+        - matching_tags is defined
         - matching_tags | length > 0
 
     - name: promoteBuildArtifact | Initialize candidate numbers
@@ -111,26 +105,24 @@
         candidate_numbers: []
       when: 
         - app_env == 'prep'
-        - candidate_numbers is not defined or candidate_numbers | length == 0
+        - candidate_numbers is not defined or (matching_tags is defined and matching_tags | length == 0)
 
-    # Determine next candidate number
+    # Determine next candidate number with safer handling
     - name: promoteBuildArtifact | Set next candidate number
       set_fact:
         candidate_number: >-
           {{
-            (candidate_numbers | max + 1)
-            if (candidate_numbers is defined and candidate_numbers | length > 0)
-            else 1
+            (candidate_numbers | default([0]) | max) + 1
           }}
       when: app_env == 'prep'
 
-    # Set release tag and suffix for prep
-    - name: promoteBuildArtifact | Set release tag for prep environment
+    # Set release tag and suffix for all environments
+    - name: promoteBuildArtifact | Set release tag
       set_fact:
         candidate_suffix: "{{'_candidate' ~ candidate_number if app_env == 'prep' else '' }}"
         release_tag: "{{ tag_name ~ ('_candidate' ~ candidate_number if app_env == 'prep' else '') }}"
 
-    - name: promoteBuildArtifact | Checkout specific files files from develop to target branch
+    - name: promoteBuildArtifact | Checkout specific files from develop to target branch
       ansible.builtin.shell: git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
@@ -147,12 +139,56 @@
       tags:
         - skip_ansible_lint
 
-    - name: promoteBuildArtifact | Commit and push promoted artifacts to target branch
-      ansible.builtin.shell: |
-        cd "{{ destination_directory }}/{{ github_repo_name }}"
-        git add .
-        git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
-        git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
-        git push origin {{ target_branch | default('master') }} --tags
+    # Check if remote tag exists before committing
+    - name: promoteBuildArtifact | Check if remote tag exists
+      command: git ls-remote --tags origin {{ release_tag }}
+      register: tag_exists
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      changed_when: false
       tags:
         - skip_ansible_lint
+
+    # Pull latest changes before pushing to avoid rejection
+    - name: promoteBuildArtifact | Pull latest changes
+      command: git pull --rebase origin {{ target_branch | default('master') }}
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      tags:
+        - skip_ansible_lint
+
+    # Enhanced commit and push with error handling
+    - name: promoteBuildArtifact | Commit and push promoted artifacts
+      block:
+        - name: Commit and push changes
+          ansible.builtin.shell: |
+            cd "{{ destination_directory }}/{{ github_repo_name }}"
+            git add .
+            if [ -n "$(git status --porcelain)" ]; then
+              git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
+            fi
+            
+            if [ -z "{{ tag_exists.stdout }}" ]; then
+              git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+            else
+              echo "Tag {{ release_tag }} already exists, skipping tag creation"
+            fi
+            
+            git push origin {{ target_branch | default('master') }} --tags
+          register: git_push_result
+          tags:
+            - skip_ansible_lint
+      rescue:
+        - name: Handle git error - delete tag locally if needed
+          shell: |
+            cd "{{ destination_directory }}/{{ github_repo_name }}"
+            if git tag | grep -q "{{ release_tag }}"; then
+              git tag -d {{ release_tag }}
+            fi
+          when: tag_exists.stdout != ""
+          tags:
+            - skip_ansible_lint
+          
+        - name: Fail with useful error message
+          fail:
+            msg: "Git operations failed. Make sure your branch is up to date and tag doesn't already exist remotely."
