@@ -1,18 +1,66 @@
- # Check if remote tag exists before committing
-    - name: promoteBuildArtifact | Check if remote tag exists
-      command: git ls-remote --tags origin {{ release_tag }}
-      register: tag_exists
+    - name: promoteBuildArtifact | Get existing git tags
+      command: git tag
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      register: git_tags
       changed_when: false
-      tags:
-        - skip_ansible_lint
 
-    # Pull latest changes before pushing to avoid rejection
-    - name: promoteBuildArtifact | Pull latest changes
-      command: git pull --rebase origin {{ target_branch | default('master') }}
+    # Simplified candidate number handling with defaults
+    - name: promoteBuildArtifact | Set candidate number
+      set_fact:
+        candidate_number: 1
+        matching_tags: []
+      when: app_env == 'prep'
+
+    - name: promoteBuildArtifact | Find matching tags
+      set_fact:
+        matching_tags: "{{ git_tags.stdout_lines | select('search', tag_name + '_candidate\\d+') | list }}"
+      when: app_env == 'prep' and git_tags.stdout_lines | length > 0
+
+    - name: promoteBuildArtifact | Set candidate numbers if tags found
+      block:
+        - set_fact:
+            candidate_numbers: "{{ matching_tags | map('regex_search', '_candidate(\\d+)', '\\1') | select('string') | map('int') | list }}"
+          when: matching_tags | length > 0
+        
+        - set_fact:
+            candidate_number: "{{ candidate_numbers | max + 1 }}"
+          when: candidate_numbers is defined and candidate_numbers | length > 0
+      when: app_env == 'prep'
+
+    - name: promoteBuildArtifact | Set release tag
+      set_fact:
+        release_tag: "{{ tag_name }}{{ '_candidate' + candidate_number|string if app_env == 'prep' else '' }}"
+
+    - name: promoteBuildArtifact | Checkout files from develop
+      shell: git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+      loop: "{{ files_to_release }}"
+      failed_when: false  # Don't fail if file doesn't exist
+      tags: skip_ansible_lint
+
+    - name: promoteBuildArtifact | Check if tag exists
+      command: git tag -l {{ release_tag }}
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}"
-      tags:
-        - skip_ansible_lint
-      
+      register: local_tag_exists
+      changed_when: false
+
+    - name: promoteBuildArtifact | Commit and push changes
+      shell: |
+        cd "{{ destination_directory }}/{{ github_repo_name }}"
+        git add .
+        git_status=$(git status --porcelain)
+        if [ -n "$git_status" ]; then
+          git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
+        fi
+        
+        if [ -z "$(git tag -l {{ release_tag }})" ]; then
+          git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+        fi
+        
+        git push origin {{ target_branch }} --tags || (git fetch origin && git push origin {{ target_branch }} --tags --force)
+      register: git_push
+      failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
+      tags: skip_ansible_lint
