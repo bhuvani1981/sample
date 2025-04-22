@@ -1,4 +1,60 @@
-files_to_release:
-    - { src: "ars-web", filename: "ars-web-5687687.tar.gz", artifact_folder: "frontend" }
-    - { { src: "ars-backend", filename: "ars-backend-587578.tar.gz", artifact_folder: "backend" }
-    -
+- name: promoteBuildArtifact | Checkout specific files from develop to target branch
+  ansible.builtin.shell: |
+    if git ls-tree -r --name-only origin/develop | grep -q "{{ item.artifact_folder }}/{{ item.filename }}"; then
+      git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
+      echo "Successfully checked out {{ item.artifact_folder }}/{{ item.filename }}"
+    else
+      echo "WARNING: File {{ item.artifact_folder }}/{{ item.filename }} not found in develop branch"
+      exit 1
+    fi
+  args:
+    chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+  register: checkout_result
+  failed_when: checkout_result.rc != 0
+  loop: "{{ files_to_release }}"
+  tags:
+    - skip_ansible_lint
+
+- name: promoteBuildArtifact | Check for changes
+  ansible.builtin.command: git status --porcelain
+  args:
+    chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+  register: git_status
+  changed_when: false
+  tags:
+    - skip_ansible_lint
+
+- name: promoteBuildArtifact | Commit and push promoted artifacts
+  block:
+    - name: Commit and push changes
+      ansible.builtin.shell: |
+        cd "{{ destination_directory }}/{{ github_repo_name }}"
+        git add .
+        if [ -n "$(git status --porcelain)" ]; then
+          git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
+        fi
+        
+        if [ -z "{{ tag_exists.stdout }}" ]; then
+          git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+        else
+          echo "Tag {{ release_tag }} already exists, skipping tag creation"
+        fi
+        
+        git push origin {{ target_branch | default('master') }} --tags
+      register: git_push_result
+      tags:
+        - skip_ansible_lint
+  rescue:
+    - name: Handle git error - delete tag locally if needed
+      shell: |
+        cd "{{ destination_directory }}/{{ github_repo_name }}"
+        if git tag | grep -q "{{ release_tag }}"; then
+          git tag -d {{ release_tag }}
+        fi
+      when: tag_exists is defined and tag_exists.stdout != ""
+      tags:
+        - skip_ansible_lint
+      
+    - name: Fail with useful error message
+      fail:
+        msg: "Git operations failed. Make sure your branch is up to date and tag doesn't already exist remotely."
