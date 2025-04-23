@@ -1,75 +1,125 @@
-- name: promoteBuildArtifact | Get existing git tags
+- name: Promote artifacts to GitHub repo
+  hosts: "{{ var_hosts }}"
+  become: true
+
+  roles:
+    - ansible-role-awscli
+
+  vars:
+    github_repo_name: "ars-build-artifacts"
+    destination_directory: "/opt/tmp"
+    build_user: "{{ lookup('ansible.builtin.env', 'BUILDUSER') }}"
+    build_token: "{{ lookup('ansible.builtin.env', 'BUILDTOKEN') }}"
+
+  pre_tasks:
+    - name: Load default environment variables
+      include_vars:
+        dir: ../vars/ars-defaults
+        extensions: [yml]
+
+    - name: Load pre-task logic
+      include_tasks: ../tasks/playbookPreTasks.yml
+
+  tasks:
+    - name: Set facts for checkout
+      set_fact:
+        destination_repo: "https://{{ build_user }}:{{ build_token }}@github.com/department-of-veterans-affairs/{{ github_repo_name }}"
+        files_to_release: "{{ lookup('ansible.builtin.env', 'files_to_release') }}"
+        tag_name: "{{ lookup('ansible.builtin.env', 'tag_name') }}"
+        target_branch: "{{ lookup('ansible.builtin.env', 'target_branch') }}"
+
+    - name: Ensure destination directory exists
+      ansible.builtin.file:
+        path: "{{ destination_directory }}/{{ github_repo_name }}"
+        state: directory
+        mode: '0750'
+
+    - name: Clone and prepare git repo
+      git:
+        repo: "{{ destination_repo }}"
+        dest: "{{ destination_directory }}/{{ github_repo_name }}"
+        version: "{{ target_branch }}"
+        clone: yes
+        force: yes
+        update: yes
+
+    - name: Fetch all git tags
       command: git tag
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}"
       register: git_tags
       changed_when: false
+      tags: skip_ansible_lint
 
-    # Always define candidate_number initially
-    - name: promoteBuildArtifact | Set default candidate number
+    - name: Set default candidate number and tag list
       set_fact:
         candidate_number: 1
         matching_tags: []
 
-    - name: promoteBuildArtifact | Find matching tags
+    - name: Find matching candidate tags
       set_fact:
         matching_tags: "{{ git_tags.stdout_lines | select('search', tag_name + '_candidate\\d+') | list }}"
       when: app_env == 'prep' and git_tags.stdout_lines | length > 0
 
-    - name: promoteBuildArtifact | Set candidate numbers if tags found
+    - name: Calculate next candidate number if tags found
+      when: app_env == 'prep'
       block:
-        - set_fact:
+        - name: Extract candidate numbers from tags
+          set_fact:
             candidate_numbers: "{{ matching_tags | map('regex_search', '_candidate(\\d+)', '\\1') | select('string') | map('int') | list }}"
           when: matching_tags | length > 0
 
-        - set_fact:
+        - name: Increment candidate number
+          set_fact:
             candidate_number: "{{ candidate_numbers | max + 1 }}"
           when: candidate_numbers is defined and candidate_numbers | length > 0
-      when: app_env == 'prep'
 
-    - name: promoteBuildArtifact | Set release tag
+    - name: Set candidate suffix and release tag
       set_fact:
         candidate_suffix: "{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
         release_tag: "{{ tag_name }}{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
 
-    - name: promoteBuildArtifact | Debug candidate suffix
+    - name: Show calculated tag details
       debug:
         msg:
           - "tag_name: {{ tag_name }}"
-          - "candidate_number: {{ candidate_number | default('not set') }}"
-          - "candidate_suffix: {{ candidate_suffix | default('not set') }}"
-          - "release_tag: {{ release_tag | default('not set') }}"
+          - "candidate_number: {{ candidate_number }}"
+          - "candidate_suffix: {{ candidate_suffix }}"
+          - "release_tag: {{ release_tag }}"
       tags: always
 
-    - name: promoteBuildArtifact | Checkout files from develop
-      shell: git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
+    - name: Checkout artifacts from develop branch
+      ansible.builtin.shell: >
+        git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
       args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}/"
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
       loop: "{{ files_to_release }}"
       failed_when: false
       tags: skip_ansible_lint
 
-    - name: promoteBuildArtifact | Check if tag exists
+    - name: Check if tag already exists
       command: git tag -l {{ release_tag }}
       args:
         chdir: "{{ destination_directory }}/{{ github_repo_name }}"
       register: local_tag_exists
       changed_when: false
+      tags: skip_ansible_lint
 
-    - name: promoteBuildArtifact | Commit and push changes
-      shell: |
+    - name: Commit and tag artifacts
+      ansible.builtin.shell: |
         cd "{{ destination_directory }}/{{ github_repo_name }}"
         git add .
         git_status=$(git status --porcelain)
         if [ -n "$git_status" ]; then
           git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
         fi
-
         if [ -z "$(git tag -l {{ release_tag }})" ]; then
           git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
         fi
-
         git push origin {{ target_branch }} --tags || (git fetch origin && git push origin {{ target_branch }} --tags --force)
       register: git_push
       failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
       tags: skip_ansible_lint
+
+
+      
