@@ -1,3 +1,123 @@
+           - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set Branch
+        id: get_branch
+        run: |
+          if ${{ github.event_name == 'pull_request' }}
+          then
+            echo "BRANCH_NAME=${GITHUB_HEAD_REF}" >> $GITHUB_ENV
+          else
+            echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
+          fi
+
+      - name: Show Branch name
+        run: echo $BRANCH_NAME
+
+      - name: Setup Java ${{ matrix.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: ${{ matrix.distribution }}
+
+      - name: Get Github Last Commit and Release Tag
+        run: |
+          echo "COMMIT_ID=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_ENV
+          echo "BUILD_ID=$(echo ${GITHUB_RUN_NUMBER})" >> $GITHUB_ENV
+          # Fetch all tags and sort them using version numer
+          # Extract only the version portion and remove any trailing text
+          git fetch --tags
+          tagregex="v${ref_version}*"
+          echo "reference version is $ref_version"
+          echo "regex is $tagregex"
+          last_tag_hash=$(git rev-list --max-count=1 --tags="${tagregex}")
+          if [ -n "$last_tag_hash" ]; then
+            tag=$(git tag --contains "$last_tag_hash" | grep -E '^v[0-9]' | sort -V | tail -1)
+          else
+            tag=$(git tag -l 'v[0-9]*' | sort -V | tail -1)
+          fi
+          final_tag=$(echo "$tag" | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          if [[ -z "$final_tag" ]]; then
+            echo "No valid version tag found. Falling back to ref_version: $ref_version"
+            final_tag="$ref_version"
+          fi
+          echo "latest_release_tag=$final_tag" >> $GITHUB_ENV
+          echo "TIMESTAMP=$(date "+%s")" >> $GITHUB_ENV
+      - name: Test validity of last_release_tag
+        id: reset_last_release_tag
+        run: |
+          if [[ -z "$latest_release_tag" ]]
+          then
+            echo "unable to determine latest release tag, start from base"
+            echo "latest_release_tag=$ref_version" >> $GITHUB_ENV
+          fi
+      - name: Output Variables
+        run: |
+          echo GitHub REF is ${GITHUB_REF}
+          echo branch name is $BRANCH_NAME
+          echo commit ID is $COMMIT_ID
+          echo TimeStamp is $TIMESTAMP
+          echo latest_release_tag is $latest_release_tag
+          echo BUILD_ID is $BUILD_ID
+      - name: Set Environment variable to get next release version
+        run: |
+          scope=${scope:-patch}
+          echo "scope: ${scope}"
+          if [ "$scope" == "major" ]; then
+            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
+            major_version="${version_parts[0]}"
+            next_version="$((major_version +1)).0.0" >> $GITHUB_ENV
+          elif [ "$scope" == "minor" ]; then
+            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
+            major_version="${version_parts[0]}"
+            minor_version="${version_parts[1]}"
+            next_version="$major_version.$((minor_version +1)).0" >> $GITHUB_ENV
+          else
+            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
+            major_version="${version_parts[0]}"
+            minor_version="${version_parts[1]}"
+            patch_version="${version_parts[2]}"
+            next_version="$major_version.$minor_version.$((patch_version +1))"
+          fi
+          echo "next_release_version=$next_version" >> $GITHUB_ENV
+
+      - name: Set Release version variable and Retag packageVersion for branch
+        run: |
+          echo "DISTRIBUTION_FILENAME=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}.war" >> $GITHUB_ENV
+          echo "PACKAGE_VERSION=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}" >> $GITHUB_ENV
+          if [[ "$BRANCH_NAME" != "master" && "$BRANCH_NAME" != "develop" ]]; then
+            echo "DISTRIBUTION_FILENAME=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}-${{env.BRANCH_NAME}}.war" >> $GITHUB_ENV
+            echo "PACKAGE_VERSION=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}-${{env.BRANCH_NAME}}" >> $GITHUB_ENV
+          fi
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Execute Gradle Build
+        run: |
+          gradle --no-build-cache --refresh-dependencies -b $BUILD_FILE -DdistributionFileName=$DISTRIBUTION_FILENAME -Dversion=$PACKAGE_VERSION -Dorg.gradle.warning.mode=all clean build unitTest -i
+
+      - name: Find version.properties
+        run: |
+          if find . -type f  -name "version.properties" | grep -z .; then 
+            echo "version.properties file found"
+            echo "version_file_found=true" >> $GITHUB_ENV
+          else
+            echo "version.properties file not found"
+            echo "version_file_found=false" >> $GITHUB_ENV
+          fi
+
+      - name: Check for version.properties
+        if: env.version_file_found == false
+        run: echo "Exiting build because version.properties not found!" && exit 1
+
+      - name: Upload test Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report_${{ steps.get_branch.outputs.BRANCH_NAME }}_JAVA${{ matrix.java-version }}_${{ matrix.distribution }}_distribution
+          path: ARS_Backend/ars_app/build/reports/tests/
+          retention-days: 30
+
       - name: Upload the Package
         uses: actions/upload-artifact@v4
         with:
@@ -17,6 +137,9 @@
           if [[ "${{ env.APP_PROJ_NAME }}" == "ars-backend" ]]; then
             dest_dir="backend"
           fi
+          pwd
+          ls -al ${{ github.workspace }}/${{ env.TARGET_DIR }}
+          ls -al ${{ github.workspace }}/ars-build/backend
 
           mv ${{ github.workspace }}/${{ env.TARGET_DIR }}/ars.war ars-build/$dest_dir/
 
@@ -28,3 +151,4 @@
           git add .
           git commit -m "checkin of ${{env.next_release_version}} ARS Build Artifacts"
           git push origin develop
+
