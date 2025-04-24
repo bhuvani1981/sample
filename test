@@ -1,125 +1,30 @@
-- name: Promote artifacts to GitHub repo
-  hosts: "{{ var_hosts }}"
-  become: true
+      - name: Upload the Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_VERSION }}_JAVA${{ matrix.java-version }}_${{ matrix.distribution }}_distribution
+          path: ${{ github.workspace }}/${{ env.TARGET_DIR }}/ars.war
 
-  roles:
-    - ansible-role-awscli
+      - name: Upload the artifacts to build-artifacts Repo(Develop Branch)
+        uses: actions/checkout@v4
+        with:
+          repository: "department-of-veterans-affairs/${{ env.github_repo_name }}"
+          token: ${{ secrets.REGISTRY_TOKEN }}
+          ref: develop
+          path: ars-build
 
-  vars:
-    github_repo_name: "ars-build-artifacts"
-    destination_directory: "/opt/tmp"
-    build_user: "{{ lookup('ansible.builtin.env', 'BUILDUSER') }}"
-    build_token: "{{ lookup('ansible.builtin.env', 'BUILDTOKEN') }}"
+      - name: Copy Build Artifacts to Correct Directory
+        run: |
+          if [[ "${{ env.APP_PROJ_NAME }}" == "ars-backend" ]]; then
+            dest_dir="backend"
+          fi
 
-  pre_tasks:
-    - name: Load default environment variables
-      include_vars:
-        dir: ../vars/ars-defaults
-        extensions: [yml]
+          mv ${{ github.workspace }}/${{ env.TARGET_DIR }}/ars.war ars-build/$dest_dir/
 
-    - name: Load pre-task logic
-      include_tasks: ../tasks/playbookPreTasks.yml
-
-  tasks:
-    - name: Set facts for checkout
-      set_fact:
-        destination_repo: "https://{{ build_user }}:{{ build_token }}@github.com/department-of-veterans-affairs/{{ github_repo_name }}"
-        files_to_release: "{{ lookup('ansible.builtin.env', 'files_to_release') }}"
-        tag_name: "{{ lookup('ansible.builtin.env', 'tag_name') }}"
-        target_branch: "{{ lookup('ansible.builtin.env', 'target_branch') }}"
-
-    - name: Ensure destination directory exists
-      ansible.builtin.file:
-        path: "{{ destination_directory }}/{{ github_repo_name }}"
-        state: directory
-        mode: '0750'
-
-    - name: Clone and prepare git repo
-      git:
-        repo: "{{ destination_repo }}"
-        dest: "{{ destination_directory }}/{{ github_repo_name }}"
-        version: "{{ target_branch }}"
-        clone: yes
-        force: yes
-        update: yes
-
-    - name: Fetch all git tags
-      command: git tag
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
-      register: git_tags
-      changed_when: false
-      tags: skip_ansible_lint
-
-    - name: Set default candidate number and tag list
-      set_fact:
-        candidate_number: 1
-        matching_tags: []
-
-    - name: Find matching candidate tags
-      set_fact:
-        matching_tags: "{{ git_tags.stdout_lines | select('search', tag_name + '_candidate\\d+') | list }}"
-      when: app_env == 'prep' and git_tags.stdout_lines | length > 0
-
-    - name: Calculate next candidate number if tags found
-      when: app_env == 'prep'
-      block:
-        - name: Extract candidate numbers from tags
-          set_fact:
-            candidate_numbers: "{{ matching_tags | map('regex_search', '_candidate(\\d+)', '\\1') | select('string') | map('int') | list }}"
-          when: matching_tags | length > 0
-
-        - name: Increment candidate number
-          set_fact:
-            candidate_number: "{{ candidate_numbers | max + 1 }}"
-          when: candidate_numbers is defined and candidate_numbers | length > 0
-
-    - name: Set candidate suffix and release tag
-      set_fact:
-        candidate_suffix: "{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
-        release_tag: "{{ tag_name }}{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
-
-    - name: Show calculated tag details
-      debug:
-        msg:
-          - "tag_name: {{ tag_name }}"
-          - "candidate_number: {{ candidate_number }}"
-          - "candidate_suffix: {{ candidate_suffix }}"
-          - "release_tag: {{ release_tag }}"
-      tags: always
-
-    - name: Checkout artifacts from develop branch
-      ansible.builtin.shell: >
-        git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
-      loop: "{{ files_to_release }}"
-      failed_when: false
-      tags: skip_ansible_lint
-
-    - name: Check if tag already exists
-      command: git tag -l {{ release_tag }}
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
-      register: local_tag_exists
-      changed_when: false
-      tags: skip_ansible_lint
-
-    - name: Commit and tag artifacts
-      ansible.builtin.shell: |
-        cd "{{ destination_directory }}/{{ github_repo_name }}"
-        git add .
-        git_status=$(git status --porcelain)
-        if [ -n "$git_status" ]; then
-          git commit -m "ars_promoteBuildArtifacts-{{ release_tag }}"
-        fi
-        if [ -z "$(git tag -l {{ release_tag }})" ]; then
-          git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
-        fi
-        git push origin {{ target_branch }} --tags || (git fetch origin && git push origin {{ target_branch }} --tags --force)
-      register: git_push
-      failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
-      tags: skip_ansible_lint
-
-
-      
+      - name: Commit and Push the Artifacts
+        run: |
+          cd ars-build
+          git config --global user.email "${{ secrets.REGISTRY_USER }}@users.noreply.github.com"
+          git config --global user.name "${{ secrets.REGISTRY_USER }}"
+          git add .
+          git commit -m "checkin of ${{env.next_release_version}} ARS Build Artifacts"
+          git push origin develop
