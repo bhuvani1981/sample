@@ -1,154 +1,484 @@
-           - name: Checkout repository
-        uses: actions/checkout@v4
+---
+# create/check release folder
+# copy public to remote folder
+- name: deployARSBackend | Deploy ARS Backend
+  hosts: "{{ var_hosts }}"
+  gather_facts: true
+  remote_user: "{{ ansible_ssh_user }}"
+  become: true
 
-      - name: Set Branch
-        id: get_branch
-        run: |
-          if ${{ github.event_name == 'pull_request' }}
-          then
-            echo "BRANCH_NAME=${GITHUB_HEAD_REF}" >> $GITHUB_ENV
-          else
-            echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
-          fi
+  roles:
+    - ansible-role-awscli
 
-      - name: Show Branch name
-        run: echo $BRANCH_NAME
+  vars:
+    stage_path: ""
+    app_name: ars-backend
+    deployment_filename: "{{ lookup('ansible.builtin.env', 'deployment_filename') }}"
+    github_project_repo: ars-backend
+    local_stage_path: "{{ tomcat_webapps }}/ars.war"
+    date_string: "{{ lookup('pipe','date +%Y%m%d_%H%M%S') }}"
+    arsPropFileLocation: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes/application.properties"
 
-      - name: Setup Java ${{ matrix.java-version }}
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ matrix.java-version }}
-          distribution: ${{ matrix.distribution }}
+  pre_tasks:
+    - name: deployARSBackend | Include all files in vars
+      include_vars:
+        dir: ../vars/ars-defaults
+        extensions:
+          - yml
 
-      - name: Get Github Last Commit and Release Tag
-        run: |
-          echo "COMMIT_ID=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_ENV
-          echo "BUILD_ID=$(echo ${GITHUB_RUN_NUMBER})" >> $GITHUB_ENV
-          # Fetch all tags and sort them using version numer
-          # Extract only the version portion and remove any trailing text
-          git fetch --tags
-          tagregex="v${ref_version}*"
-          echo "reference version is $ref_version"
-          echo "regex is $tagregex"
-          last_tag_hash=$(git rev-list --max-count=1 --tags="${tagregex}")
-          if [ -n "$last_tag_hash" ]; then
-            tag=$(git tag --contains "$last_tag_hash" | grep -E '^v[0-9]' | sort -V | tail -1)
-          else
-            tag=$(git tag -l 'v[0-9]*' | sort -V | tail -1)
-          fi
-          final_tag=$(echo "$tag" | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-          if [[ -z "$final_tag" ]]; then
-            echo "No valid version tag found. Falling back to ref_version: $ref_version"
-            final_tag="$ref_version"
-          fi
-          echo "latest_release_tag=$final_tag" >> $GITHUB_ENV
-          echo "TIMESTAMP=$(date "+%s")" >> $GITHUB_ENV
-      - name: Test validity of last_release_tag
-        id: reset_last_release_tag
-        run: |
-          if [[ -z "$latest_release_tag" ]]
-          then
-            echo "unable to determine latest release tag, start from base"
-            echo "latest_release_tag=$ref_version" >> $GITHUB_ENV
-          fi
-      - name: Output Variables
-        run: |
-          echo GitHub REF is ${GITHUB_REF}
-          echo branch name is $BRANCH_NAME
-          echo commit ID is $COMMIT_ID
-          echo TimeStamp is $TIMESTAMP
-          echo latest_release_tag is $latest_release_tag
-          echo BUILD_ID is $BUILD_ID
-      - name: Set Environment variable to get next release version
-        run: |
-          scope=${scope:-patch}
-          echo "scope: ${scope}"
-          if [ "$scope" == "major" ]; then
-            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
-            major_version="${version_parts[0]}"
-            next_version="$((major_version +1)).0.0" >> $GITHUB_ENV
-          elif [ "$scope" == "minor" ]; then
-            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
-            major_version="${version_parts[0]}"
-            minor_version="${version_parts[1]}"
-            next_version="$major_version.$((minor_version +1)).0" >> $GITHUB_ENV
-          else
-            IFS='.' read -ra version_parts <<< "${{env.latest_release_tag}}"
-            major_version="${version_parts[0]}"
-            minor_version="${version_parts[1]}"
-            patch_version="${version_parts[2]}"
-            next_version="$major_version.$minor_version.$((patch_version +1))"
-          fi
-          echo "next_release_version=$next_version" >> $GITHUB_ENV
+    - name: deployARSBackend | Include playbook pre tasks
+      include_tasks: ../tasks/playbookPreTasks.yml
 
-      - name: Set Release version variable and Retag packageVersion for branch
-        run: |
-          echo "DISTRIBUTION_FILENAME=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}.war" >> $GITHUB_ENV
-          echo "PACKAGE_VERSION=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}" >> $GITHUB_ENV
-          if [[ "$BRANCH_NAME" != "master" && "$BRANCH_NAME" != "develop" ]]; then
-            echo "DISTRIBUTION_FILENAME=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}-${{env.BRANCH_NAME}}.war" >> $GITHUB_ENV
-            echo "PACKAGE_VERSION=${{env.APP_PROJ_NAME}}-${{env.next_release_version}}-${{env.COMMIT_ID}}-${{env.BUILD_ID}}-${{env.BRANCH_NAME}}" >> $GITHUB_ENV
-          fi
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+  tasks:
+    - name: deployARSBackend | Get the s3fuse library
+      include_tasks: ../tasks/gets3Fuse.yml
 
-      - name: Execute Gradle Build
-        run: |
-          gradle --no-build-cache --refresh-dependencies -b $BUILD_FILE -DdistributionFileName=$DISTRIBUTION_FILENAME -Dversion=$PACKAGE_VERSION -Dorg.gradle.warning.mode=all clean build unitTest -i
+    - name: deployARSBackend | Stop and disable Apache HTTPD
+      systemd:
+        name: httpd
+        state: stopped
+        enabled: no
+        daemon_reload: yes
+      register: httpd_stop_result
+      failed_when:
+        - httpd_stop_result is failed
+        - "'Could not find the requested service' not in httpd_stop_result.msg"
 
-      - name: Find version.properties
-        run: |
-          if find . -type f  -name "version.properties" | grep -z .; then 
-            echo "version.properties file found"
-            echo "version_file_found=true" >> $GITHUB_ENV
-          else
-            echo "version.properties file not found"
-            echo "version_file_found=false" >> $GITHUB_ENV
-          fi
+    - name: deployARSBackend | Create ARS USER group(s)
+      group:
+        state: present
+        name: "{{ ars_default_user_group }}"
 
-      - name: Check for version.properties
-        if: env.version_file_found == false
-        run: echo "Exiting build because version.properties not found!" && exit 1
+    - name: deployARSBackend | Create ARS USER
+      user:
+        state: present
+        name: "{{ ars_default_user_name }}"
+        home: "{{ ars_default_user_home }}"
+        group: "{{ ars_default_user_group }}"
+        create_home: true
+        comment: "ARS user"
 
-      - name: Upload test Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-report_${{ steps.get_branch.outputs.BRANCH_NAME }}_JAVA${{ matrix.java-version }}_${{ matrix.distribution }}_distribution
-          path: ARS_Backend/ars_app/build/reports/tests/
-          retention-days: 30
+    - name: deployARSBackend | Change ownership of ARS USER HOME to allow group write
+      file:
+        state: directory
+        path: "{{ ars_default_user_home }}"
+        mode: 0770
 
-      - name: Upload the Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.PACKAGE_VERSION }}_JAVA${{ matrix.java-version }}_${{ matrix.distribution }}_distribution
-          path: ${{ github.workspace }}/${{ env.TARGET_DIR }}/ars.war
+    - name: deployARSBackend | Create rc files for Jenkins user to access Nexus
+      template:
+        src: ../templates/nexus/npmrc.j2 # noqa no-relative-paths
+        dest: "{{ item.dest }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+        backup: true
+      loop:
+        - { dest: "{{ jenkins_home }}/.npmrc", owner: "{{ jenkins_process_user }}", group: "{{ jenkins_process_group }}", mode: '0644' }
+        - { dest: "{{ ars_default_user_home }}/.npmrc", owner: "{{ ars_default_user_name }}", group: "{{ ars_default_user_group }}", mode: '0644' }
+        - { dest: "/root/.npmrc", owner: "root", group: "root", mode: '0644' }
+      loop_control:
+        label: "Create {{ item.dest }}"
 
-      - name: Upload the artifacts to build-artifacts Repo(Develop Branch)
-        uses: actions/checkout@v4
-        with:
-          repository: "department-of-veterans-affairs/${{ env.github_repo_name }}"
-          token: ${{ secrets.REGISTRY_TOKEN }}
-          ref: develop
-          path: ars-build
+    - name: deployARSBackend | Get artifact branch
+      set_fact:
+        artifact_branch: "{{ 'develop' if app_env in ['dev','test'] else 'master' }}"
 
-      - name: Copy Build Artifacts to Correct Directory
-        run: |
-          if [[ "${{ env.APP_PROJ_NAME }}" == "ars-backend" ]]; then
-            dest_dir="backend"
-          fi
-          pwd
-          ls -al ${{ github.workspace }}/${{ env.TARGET_DIR }}
-          ls -al ${{ github.workspace }}/ars-build/backend
+    - name: deployARSWeb | Get archive from buildartifacts
+      include_tasks: ../tasks/sparse_checkout.yml
+      vars:
+        github_repo_name: "ars-build-artifacts"
+        sparse_checkout: "{{ deployment_filename }}"
+        base_dir: "/opt/tmp"
+        branch: "{{ artifact_branch }}"
 
-          mv ${{ github.workspace }}/${{ env.TARGET_DIR }}/ars.war ars-build/$dest_dir/
+    - name: deployARSBackend | Remove existing expanded application, if exists
+      file:
+        path: "{{ local_stage_path | regex_replace('.war', '') }}"
+        state: absent
+      notify: restart_tomcat
 
-      - name: Commit and Push the Artifacts
-        run: |
-          cd ars-build
-          git config --global user.email "${{ secrets.REGISTRY_USER }}@users.noreply.github.com"
-          git config --global user.name "${{ secrets.REGISTRY_USER }}"
-          git add .
-          git commit -m "checkin of ${{env.next_release_version}} ARS Build Artifacts"
-          git push origin develop
+    - name: deployARSBackend | Unarchive {{ deployment_filename }}
+      unarchive:
+        src: "{{ archive_name.dest }}"
+        dest: "{{ tomcat_webapps }}"
+        remote_src: true
+      delegate_to: "{{ inventory_hostname }}"
 
+    #####################################################################
+    ### the following tasks setup the application configuration       ###
+    #####################################################################
+    - name: deployARSBackend | Ensure directories exist for application operation
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ tomcat_logs }}", mode: '0775', owner: "{{ tomcat_default_user_name }}", group: "{{ tomcat_default_user_group }}" }
+        - { path: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes", mode: '0755', owner: "{{ ars_default_user_name }}", group: "{{ ars_default_user_group }}" }
+        - { path: "{{ ars_default_user_name }}/fpps_emails", mode: '0775', owner: "{{ ars_default_user_name }}", group: "{{ ars_default_user_group }}" }
+      loop_control:
+        label: "Create {{ item.path }}"
+
+    - name: deployARSBackend | Create Mounts for external files using s3fs
+      include_tasks: ../tasks/configureS3Mounts.yml
+      vars:
+        s3_bucket_name: "{{ s3_bucket.name | lower }}"
+        s3_bucket_mount_name: "{{ s3_bucket.mount_name | lower }}"
+      when: s3_bucket.mount_name is defined
+      with_items: "{{ s3_buckets | default([]) }}"
+      loop_control:
+        loop_var: s3_bucket
+
+    - name: deployARSBackend | Cleanup obsolete fstab entries for S3 mount
+      lineinfile:
+        path: /etc/fstab
+        state: absent
+        regexp: '^[#]*\/mnt\/s3.*'
+
+    - name: deployARSBackend | Remove obsolete mounts
+      shell: "umount {{ ars_default_user_home }}/{{ item.path }}" # noqa command-instead-of-shell
+      register: unmount_bindings
+      changed_when: false
+      failed_when:
+        - unmount_bindings.stderr is defined
+        - unmount_bindings.stderr | length > 0
+        - not ("'not mounted' in unmount_bindings.stderr" and "'not found' in unmount_bindings.stderr")
+      loop: "{{ s3_bindings }}"
+      loop_control:
+        label: "unmount {{ ars_default_user_home }}/{{ item.path }}"
+
+    - name: deployARSBackend | Cleanup directories before linking
+      file:
+        path: "{{ ars_default_user_home }}/{{ item.path }}"
+        state: absent
+      loop: "{{ s3_bindings }}"
+      loop_control:
+        label: "Cleanup {{ ars_default_user_home }}/{{ item.path }}"
+
+    - name: deployARSBackend | Trigger handlers
+      meta: flush_handlers
+      tags:
+        - always
+
+    - name: deployARSBackend | Create Symlinks to S3
+      file:
+        path: "{{ ars_default_user_home }}/{{ item.path }}"
+        src: "{{ s3_mount_root }}/{{ ars_default_user_name | lower }}/{{ item.source }}"
+        owner: "{{ ars_default_user_name }}"
+        group: "{{ ars_default_user_group }}"
+        state: link
+      loop: "{{ s3_bindings }}"
+      loop_control:
+        label: "Create Symlink to {{ s3_mount_root }}/{{ ars_default_user_name | lower }}/{{ item.source }}"
+
+    - name: deployARSBackend | Verify symlinks exist
+      stat:
+        path: "{{ ars_default_user_home }}/{{ item.path }}"
+      loop: "{{ s3_bindings }}"
+      loop_control:
+        label: "Verify {{ ars_default_user_home }}/{{ item.path }}"
+      register: links
+      failed_when: links.stat.islnk is not defined
+
+    - name: deployARSBackend | Add existing user to group {{ s3_mount_group }}
+      user:
+        name: "{{ item }}"
+        groups: "{{ s3_mount_group }}"
+        append: yes
+      loop:
+        - "{{ ars_default_user_name }}"
+        - "{{ tomcat_default_user_name }}"
+
+    - name: deployARSBackend | Add {{ tomcat_default_user_name }} user to group {{ ars_default_user_group }}
+      user:
+        name: "{{ tomcat_default_user_name }}"
+        groups: "{{ ars_default_user_group }}"
+        append: yes
+
+    - name: deployARSBackend | Create externalized configuration files
+      template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode | default('0644') }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        force: true
+        backup: true
+      register: set_context
+      loop:
+        - src: "../templates/ars/{{ app_name }}.xml.j2"
+          dest: "{{ tomcat_conf }}/Catalina/localhost/ars.xml"
+          owner: "{{ tomcat_default_user_name }}"
+          group: "{{ tomcat_default_user_group }}"
+        - src: "../templates/ars/{{ app_name }}.application.properties.j2"
+          dest: "{{ arsPropFileLocation }}"
+          owner: "{{ ars_default_user_name }}"
+          group: "{{ ars_default_user_group }}"
+        - src: "../templates/ars/{{ app_name }}.log4j2.xml.j2"
+          dest: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes/log4j2.xml"
+          owner: "{{ ars_default_user_name }}"
+          group: "{{ ars_default_user_group }}"
+        - src: "../templates/ars/{{ app_name }}-ARSEmail.properties.j2"
+          dest: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes/ARSEmail.properties"
+          owner: "{{ ars_default_user_name }}"
+          group: "{{ ars_default_user_group }}"
+        - src: "../templates/ars/checkmounts.sh.j2"
+          dest: "/usr/local/bin/checkmounts.sh"
+          owner: "root"
+          group: "{{ s3_mount_group }}"
+          mode: '2755'
+      notify: restart_tomcat
+      loop_control:
+        label: "deploy {{ item.src }}"
+      tags:
+        - skip_ansible_lint
+
+    - name: deployARSWeb | Check if aws cw agent path exists
+      stat:
+        path: "{{ aws_cwagent_install_path }}"
+      register: aws_cwagent_present
+
+    - name: deployARSWeb | Update Cloudwatch Agent files
+      template:
+        src: "../templates/ars/{{ app_name }}-cwagent-logs.json.j2"
+        dest: "{{ aws_cwagent_install_path }}/etc/{{ app_name }}-cwagent-logs.json"
+        mode: 0755
+        owner: "root"
+        group: "root"
+      delegate_to: "{{ inventory_hostname }}"
+      failed_when: false
+      when: aws_cwagent_present.stat.exists
+
+    - name: deployARSBackend | Remove existing obsolete file from user home
+      file:
+        path: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/web.xml"
+        state: absent
+      notify: restart_tomcat
+
+    - name: deployARSBackend | Make {{ ars_default_user_home }}/{{ app_name }} tree readable by {{ tomcat_default_user_name }}
+      acl:
+        path: "{{ ars_default_user_home }}/{{ app_name }}"
+        entity: "{{ tomcat_default_user_name }}"
+        etype: user
+        permissions: rwx
+        state: present
+        recursive: yes
+
+    - name: deployARSBackend | Make {{ ars_default_user_home }} tree readable by {{ tomcat_default_user_name }}
+      acl:
+        path: "{{ ars_default_user_home }}"
+        entity: "{{ tomcat_default_user_name }}"
+        etype: user
+        permissions: rwx
+        state: present
+
+    - name: deployARSBackend | Trigger handlers
+      meta: flush_handlers
+      tags:
+        - always
+
+    - name: deployARSBackend | Ensure SELinux allows the httpd server to connect with external networks
+      command: /sbin/setsebool -P httpd_can_network_connect 1
+      changed_when: false
+
+    - name: deployARSBackend | Set logrotation
+      ansible.builtin.template:
+        src: ../templates/ars/logrotate.j2
+        dest: "/etc/logrotate.d/{{ app_name }}"
+        mode: 0644
+        force: yes
+      register: tomcat_logrotate
+      notify: restart_tomcat
+      tags:
+        - always
+
+    ###############################################
+    ### append configure cloudwatch agent to ship logs ###
+    ###############################################
+    - name: deployARSBackend | Append the new config to start command
+      ansible.builtin.command: >
+        {{ aws_cwagent_ctl }}
+        -a append-config -m {{ aws_cwagent_mode }}
+        -c file:'{{ aws_cwagent_install_path }}/etc/{{ app_name }}-cwagent-logs.json'
+        -s
+      notify: get_cwagent_status
+      when: aws_cwagent_present.stat.exists
+
+    ################################################
+    ### establish the healthiness of the backend ###
+    ################################################
+
+    - name: deployARSBackend | Wait for tomcat service to be ready
+      wait_for:
+        port: "{{ ars_api_port }}"
+        host: 127.0.0.1
+        connect_timeout: 5
+        delay: 5
+        timeout: 300
+
+    - name: deployARSBackend | Verfy version.properties file exists
+      assert:
+        that:
+          - "'{{ local_stage_path | regex_replace('.war', '') }}/WEB-INF/classes/version.properties'"
+        fail_msg: "version.properties file doesn't exists"
+
+    - name: deployARSBackend | Importing the Backend MetaData contents to variable
+      slurp:
+        src: "{{ local_stage_path | regex_replace('.war', '') }}/WEB-INF/classes/version.properties"
+      register: backend_metadata
+
+    - name: deployARSBackend | Decode the backend metadata content
+      set_fact:
+        meta_content: "{{ (backend_metadata['content'] | b64decode ) }}"
+
+    - name: deployARSBackend | Extract metadata key value pairs and convert to dict
+      set_fact:
+        meta_dict: "{{ meta_dict | default({}) | combine({ key: value }) }}"
+      loop: "{{ meta_content.splitlines() }}"
+      vars:
+        key: "{{ item.split('=')[0].strip() }}"
+        value: "{{ item.split('=')[1].strip() }}"
+      when: item | length > 0 and '=' in item
+
+    - name: deployARSBackend | Convert metadata dictionary to json content
+      set_fact:
+         meta_json_content: "{{ meta_dict | to_json(indent=2) }}"
+
+    - name: deployARSBackend | Parse the metadata Json file
+      set_fact:
+        json_data: "{{ meta_json_content | from_json }}"
+
+    - name: deployARSBackend | Set facts for ARS Backend Meta Data
+      set_fact:
+        appName: "{{ json_data['product'] }}"
+        distributionFileName: "{{ json_data['distributionFileName'] }}"
+        lastBuildDate: "{{ json_data['buildTime'] }}"
+        distributionVersion: "{{ json_data['version'] }}"
+
+    - name: deployARSBackend | Output meta
+      debug:
+        msg: "{{ appName }}, {{ distributionFileName }}, {{ lastBuildDate }}, {{ distributionVersion }}"
+      tags: find_meta
+
+    - name: deployARSBackend | Get the username running the deploy
+      command: whoami
+      delegate_to: localhost
+      register: username_on_the_host
+      changed_when: False
+      become: no
+      tags:
+        - find_manifest
+
+    - name: deployARSBackend | Verify {{ ars_backend_health_route }} is accessible
+      uri:
+        url: "http://localhost:{{ ars_api_port }}{{ ars_backend_health_route }}"
+        status_code: 200
+        validate_certs: false
+        return_content: yes
+        timeout: 15
+      until: appup.status == 200
+      retries: 30
+      delay: 5
+      register: appup
+      tags: find_manifest
+
+    - name: deployARSBackend | Show status of health check
+      debug:
+        var: appup.content
+
+    - name: deployARSBackend | Collect results of content returned
+      set_fact:
+        app_running: "{{ appup.content | regex_replace('^.*<p>(.*)</p>.*', '\\1') }}"
+        line_items: "{{ appup.content | regex_replace('^.*<ul>(.*)</ul>.*', '\\1') | replace('<li>', '\n')| replace('</li>', '') }}"
+
+#############################################################################
+### the following tasks are just to support logging our actual deployment ###
+#############################################################################
+    - name: deployARSBackend | Ensure logging for server exists
+      file:
+        path: "{{ item.src }}"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+      with_items:
+        - { src: /var/log/deployments }
+
+    - name: deployARSBackend | Update server deployment history
+      lineinfile:
+        dest: "/var/log/deployments/{{ app_name }}_{{ env }}_deploymentHistory.log"
+        line: >
+          "{{ date_string }},
+          {{ username_on_the_host.stdout }},
+          {{ appName }},
+          {{ distributionVersion }},
+          {{ distributionFileName }}"
+        create: yes
+        insertafter: EOF
+        state: present
+        mode: 0755
+      tags: find_manifest
+
+    - name: deployARSBackend | Setup Crontab
+      ansible.builtin.include_tasks: ../tasks/configureCrontab.yml
+      vars:
+        application: "{{ app_name }}"
+        crontab_entries: "{{ backend_crontab_entries }}"
+
+    - name: deployARSBackend | Send Email to users
+      community.general.mail:
+        subject: "Deployment completed for ARS Backend {{ env | upper }}"
+        body: "{{ lookup('template', '../templates/ars/deployment_notification_body.j2') }}"
+        from: jenkins@{{ inventory_hostname }} (AWS Automation)
+        to: "{{ ars_be_notification_list }}"
+        cc:
+          - "{{ default_reply_email }}"
+        headers:
+          - Reply-To="{{ default_reply_email }}"
+          - X-Special="Notification for deployment"
+        subtype: html
+      vars:
+        paragraph1: "Deployment env: {{ friendly_env }}"
+        paragraph2: |
+           APP NAME : {{ appName }}<br>
+           Deployed Date : {{ date_string }}<br>
+           Last Build Date : {{ lastBuildDate }}<br>
+           Distribution Version : {{ distributionVersion }}<br>
+           Distribution File Deployed : {{ distributionFileName }}<br>
+           {{ appup.content }}<br>
+      failed_when: false
+
+  handlers:
+    - name: restart_tomcat
+      systemd:
+        name: tomcat
+        state: restarted
+        daemon_reload: yes
+      register: tomcat_status
+
+    - name: reload_mount
+      ansible.builtin.shell: |
+        fusermount -uz {{ s3_mount_root }}/ars;
+        mount -a;
+      tags:
+        - skip_ansible_lint
+
+    - name: get_cwagent_status
+      ansible.builtin.command: >
+        {{ aws_cwagent_install_path }}/bin/{{ aws_cwagent_package }}-ctl
+        -m ec2
+        -a status
+      register: cwagent_status
+      failed_when: >
+        cwagent_status.rc > 0 or
+        'running' not in cwagent_status.stdout
+      notify: print_cwagent_status
+
+    - name: print_cwagent_status
+      ansible.builtin.debug:
+        msg: "{{ cwagent_status.stdout }}"
+      when:
+        - cwagent_status.stdout is defined
+        - cwagent_status.stdout | length > 0
