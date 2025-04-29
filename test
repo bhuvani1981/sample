@@ -1,484 +1,66 @@
----
-# create/check release folder
-# copy public to remote folder
-- name: deployARSBackend | Deploy ARS Backend
-  hosts: "{{ var_hosts }}"
-  gather_facts: true
-  remote_user: "{{ ansible_ssh_user }}"
-  become: true
-
-  roles:
-    - ansible-role-awscli
-
-  vars:
-    stage_path: ""
-    app_name: ars-backend
-    deployment_filename: "{{ lookup('ansible.builtin.env', 'deployment_filename') }}"
-    github_project_repo: ars-backend
-    local_stage_path: "{{ tomcat_webapps }}/ars.war"
-    date_string: "{{ lookup('pipe','date +%Y%m%d_%H%M%S') }}"
-    arsPropFileLocation: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes/application.properties"
-
-  pre_tasks:
-    - name: deployARSBackend | Include all files in vars
-      include_vars:
-        dir: ../vars/ars-defaults
-        extensions:
-          - yml
-
-    - name: deployARSBackend | Include playbook pre tasks
-      include_tasks: ../tasks/playbookPreTasks.yml
-
-  tasks:
-    - name: deployARSBackend | Get the s3fuse library
-      include_tasks: ../tasks/gets3Fuse.yml
-
-    - name: deployARSBackend | Stop and disable Apache HTTPD
-      systemd:
-        name: httpd
-        state: stopped
-        enabled: no
-        daemon_reload: yes
-      register: httpd_stop_result
-      failed_when:
-        - httpd_stop_result is failed
-        - "'Could not find the requested service' not in httpd_stop_result.msg"
-
-    - name: deployARSBackend | Create ARS USER group(s)
-      group:
-        state: present
-        name: "{{ ars_default_user_group }}"
-
-    - name: deployARSBackend | Create ARS USER
-      user:
-        state: present
-        name: "{{ ars_default_user_name }}"
-        home: "{{ ars_default_user_home }}"
-        group: "{{ ars_default_user_group }}"
-        create_home: true
-        comment: "ARS user"
-
-    - name: deployARSBackend | Change ownership of ARS USER HOME to allow group write
-      file:
-        state: directory
-        path: "{{ ars_default_user_home }}"
-        mode: 0770
-
-    - name: deployARSBackend | Create rc files for Jenkins user to access Nexus
-      template:
-        src: ../templates/nexus/npmrc.j2 # noqa no-relative-paths
-        dest: "{{ item.dest }}"
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
-        mode: "{{ item.mode }}"
-        backup: true
-      loop:
-        - { dest: "{{ jenkins_home }}/.npmrc", owner: "{{ jenkins_process_user }}", group: "{{ jenkins_process_group }}", mode: '0644' }
-        - { dest: "{{ ars_default_user_home }}/.npmrc", owner: "{{ ars_default_user_name }}", group: "{{ ars_default_user_group }}", mode: '0644' }
-        - { dest: "/root/.npmrc", owner: "root", group: "root", mode: '0644' }
-      loop_control:
-        label: "Create {{ item.dest }}"
-
-    - name: deployARSBackend | Get artifact branch
-      set_fact:
-        artifact_branch: "{{ 'develop' if app_env in ['dev','test'] else 'master' }}"
-
-    - name: deployARSWeb | Get archive from buildartifacts
-      include_tasks: ../tasks/sparse_checkout.yml
-      vars:
-        github_repo_name: "ars-build-artifacts"
-        sparse_checkout: "{{ deployment_filename }}"
-        base_dir: "/opt/tmp"
-        branch: "{{ artifact_branch }}"
-
-    - name: deployARSBackend | Remove existing expanded application, if exists
-      file:
-        path: "{{ local_stage_path | regex_replace('.war', '') }}"
-        state: absent
-      notify: restart_tomcat
-
-    - name: deployARSBackend | Unarchive {{ deployment_filename }}
-      unarchive:
-        src: "{{ archive_name.dest }}"
-        dest: "{{ tomcat_webapps }}"
-        remote_src: true
-      delegate_to: "{{ inventory_hostname }}"
-
-    #####################################################################
-    ### the following tasks setup the application configuration       ###
-    #####################################################################
-    - name: deployARSBackend | Ensure directories exist for application operation
-      file:
-        path: "{{ item.path }}"
-        state: directory
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
-        mode: "{{ item.mode }}"
-      loop:
-        - { path: "{{ tomcat_logs }}", mode: '0775', owner: "{{ tomcat_default_user_name }}", group: "{{ tomcat_default_user_group }}" }
-        - { path: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes", mode: '0755', owner: "{{ ars_default_user_name }}", group: "{{ ars_default_user_group }}" }
-        - { path: "{{ ars_default_user_name }}/fpps_emails", mode: '0775', owner: "{{ ars_default_user_name }}", group: "{{ ars_default_user_group }}" }
-      loop_control:
-        label: "Create {{ item.path }}"
-
-    - name: deployARSBackend | Create Mounts for external files using s3fs
-      include_tasks: ../tasks/configureS3Mounts.yml
-      vars:
-        s3_bucket_name: "{{ s3_bucket.name | lower }}"
-        s3_bucket_mount_name: "{{ s3_bucket.mount_name | lower }}"
-      when: s3_bucket.mount_name is defined
-      with_items: "{{ s3_buckets | default([]) }}"
-      loop_control:
-        loop_var: s3_bucket
-
-    - name: deployARSBackend | Cleanup obsolete fstab entries for S3 mount
-      lineinfile:
-        path: /etc/fstab
-        state: absent
-        regexp: '^[#]*\/mnt\/s3.*'
-
-    - name: deployARSBackend | Remove obsolete mounts
-      shell: "umount {{ ars_default_user_home }}/{{ item.path }}" # noqa command-instead-of-shell
-      register: unmount_bindings
-      changed_when: false
-      failed_when:
-        - unmount_bindings.stderr is defined
-        - unmount_bindings.stderr | length > 0
-        - not ("'not mounted' in unmount_bindings.stderr" and "'not found' in unmount_bindings.stderr")
-      loop: "{{ s3_bindings }}"
-      loop_control:
-        label: "unmount {{ ars_default_user_home }}/{{ item.path }}"
-
-    - name: deployARSBackend | Cleanup directories before linking
-      file:
-        path: "{{ ars_default_user_home }}/{{ item.path }}"
-        state: absent
-      loop: "{{ s3_bindings }}"
-      loop_control:
-        label: "Cleanup {{ ars_default_user_home }}/{{ item.path }}"
-
-    - name: deployARSBackend | Trigger handlers
-      meta: flush_handlers
-      tags:
-        - always
-
-    - name: deployARSBackend | Create Symlinks to S3
-      file:
-        path: "{{ ars_default_user_home }}/{{ item.path }}"
-        src: "{{ s3_mount_root }}/{{ ars_default_user_name | lower }}/{{ item.source }}"
-        owner: "{{ ars_default_user_name }}"
-        group: "{{ ars_default_user_group }}"
-        state: link
-      loop: "{{ s3_bindings }}"
-      loop_control:
-        label: "Create Symlink to {{ s3_mount_root }}/{{ ars_default_user_name | lower }}/{{ item.source }}"
-
-    - name: deployARSBackend | Verify symlinks exist
-      stat:
-        path: "{{ ars_default_user_home }}/{{ item.path }}"
-      loop: "{{ s3_bindings }}"
-      loop_control:
-        label: "Verify {{ ars_default_user_home }}/{{ item.path }}"
-      register: links
-      failed_when: links.stat.islnk is not defined
-
-    - name: deployARSBackend | Add existing user to group {{ s3_mount_group }}
-      user:
-        name: "{{ item }}"
-        groups: "{{ s3_mount_group }}"
-        append: yes
-      loop:
-        - "{{ ars_default_user_name }}"
-        - "{{ tomcat_default_user_name }}"
-
-    - name: deployARSBackend | Add {{ tomcat_default_user_name }} user to group {{ ars_default_user_group }}
-      user:
-        name: "{{ tomcat_default_user_name }}"
-        groups: "{{ ars_default_user_group }}"
-        append: yes
-
-    - name: deployARSBackend | Create externalized configuration files
-      template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        mode: "{{ item.mode | default('0644') }}"
-        owner: "{{ item.owner }}"
-        group: "{{ item.group }}"
-        force: true
-        backup: true
-      register: set_context
-      loop:
-        - src: "../templates/ars/{{ app_name }}.xml.j2"
-          dest: "{{ tomcat_conf }}/Catalina/localhost/ars.xml"
-          owner: "{{ tomcat_default_user_name }}"
-          group: "{{ tomcat_default_user_group }}"
-        - src: "../templates/ars/{{ app_name }}.application.properties.j2"
-          dest: "{{ arsPropFileLocation }}"
-          owner: "{{ ars_default_user_name }}"
-          group: "{{ ars_default_user_group }}"
-        - src: "../templates/ars/{{ app_name }}.log4j2.xml.j2"
-          dest: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes/log4j2.xml"
-          owner: "{{ ars_default_user_name }}"
-          group: "{{ ars_default_user_group }}"
-        - src: "../templates/ars/{{ app_name }}-ARSEmail.properties.j2"
-          dest: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/classes/ARSEmail.properties"
-          owner: "{{ ars_default_user_name }}"
-          group: "{{ ars_default_user_group }}"
-        - src: "../templates/ars/checkmounts.sh.j2"
-          dest: "/usr/local/bin/checkmounts.sh"
-          owner: "root"
-          group: "{{ s3_mount_group }}"
-          mode: '2755'
-      notify: restart_tomcat
-      loop_control:
-        label: "deploy {{ item.src }}"
-      tags:
-        - skip_ansible_lint
-
-    - name: deployARSWeb | Check if aws cw agent path exists
-      stat:
-        path: "{{ aws_cwagent_install_path }}"
-      register: aws_cwagent_present
-
-    - name: deployARSWeb | Update Cloudwatch Agent files
-      template:
-        src: "../templates/ars/{{ app_name }}-cwagent-logs.json.j2"
-        dest: "{{ aws_cwagent_install_path }}/etc/{{ app_name }}-cwagent-logs.json"
-        mode: 0755
-        owner: "root"
-        group: "root"
-      delegate_to: "{{ inventory_hostname }}"
-      failed_when: false
-      when: aws_cwagent_present.stat.exists
-
-    - name: deployARSBackend | Remove existing obsolete file from user home
-      file:
-        path: "{{ ars_default_user_home }}/{{ app_name }}/WEB-INF/web.xml"
-        state: absent
-      notify: restart_tomcat
-
-    - name: deployARSBackend | Make {{ ars_default_user_home }}/{{ app_name }} tree readable by {{ tomcat_default_user_name }}
-      acl:
-        path: "{{ ars_default_user_home }}/{{ app_name }}"
-        entity: "{{ tomcat_default_user_name }}"
-        etype: user
-        permissions: rwx
-        state: present
-        recursive: yes
-
-    - name: deployARSBackend | Make {{ ars_default_user_home }} tree readable by {{ tomcat_default_user_name }}
-      acl:
-        path: "{{ ars_default_user_home }}"
-        entity: "{{ tomcat_default_user_name }}"
-        etype: user
-        permissions: rwx
-        state: present
-
-    - name: deployARSBackend | Trigger handlers
-      meta: flush_handlers
-      tags:
-        - always
-
-    - name: deployARSBackend | Ensure SELinux allows the httpd server to connect with external networks
-      command: /sbin/setsebool -P httpd_can_network_connect 1
-      changed_when: false
-
-    - name: deployARSBackend | Set logrotation
-      ansible.builtin.template:
-        src: ../templates/ars/logrotate.j2
-        dest: "/etc/logrotate.d/{{ app_name }}"
-        mode: 0644
-        force: yes
-      register: tomcat_logrotate
-      notify: restart_tomcat
-      tags:
-        - always
-
-    ###############################################
-    ### append configure cloudwatch agent to ship logs ###
-    ###############################################
-    - name: deployARSBackend | Append the new config to start command
-      ansible.builtin.command: >
-        {{ aws_cwagent_ctl }}
-        -a append-config -m {{ aws_cwagent_mode }}
-        -c file:'{{ aws_cwagent_install_path }}/etc/{{ app_name }}-cwagent-logs.json'
-        -s
-      notify: get_cwagent_status
-      when: aws_cwagent_present.stat.exists
-
-    ################################################
-    ### establish the healthiness of the backend ###
-    ################################################
-
-    - name: deployARSBackend | Wait for tomcat service to be ready
-      wait_for:
-        port: "{{ ars_api_port }}"
-        host: 127.0.0.1
-        connect_timeout: 5
-        delay: 5
-        timeout: 300
-
-    - name: deployARSBackend | Verfy version.properties file exists
-      assert:
-        that:
-          - "'{{ local_stage_path | regex_replace('.war', '') }}/WEB-INF/classes/version.properties'"
-        fail_msg: "version.properties file doesn't exists"
-
-    - name: deployARSBackend | Importing the Backend MetaData contents to variable
-      slurp:
-        src: "{{ local_stage_path | regex_replace('.war', '') }}/WEB-INF/classes/version.properties"
-      register: backend_metadata
-
-    - name: deployARSBackend | Decode the backend metadata content
-      set_fact:
-        meta_content: "{{ (backend_metadata['content'] | b64decode ) }}"
-
-    - name: deployARSBackend | Extract metadata key value pairs and convert to dict
-      set_fact:
-        meta_dict: "{{ meta_dict | default({}) | combine({ key: value }) }}"
-      loop: "{{ meta_content.splitlines() }}"
-      vars:
-        key: "{{ item.split('=')[0].strip() }}"
-        value: "{{ item.split('=')[1].strip() }}"
-      when: item | length > 0 and '=' in item
-
-    - name: deployARSBackend | Convert metadata dictionary to json content
-      set_fact:
-         meta_json_content: "{{ meta_dict | to_json(indent=2) }}"
-
-    - name: deployARSBackend | Parse the metadata Json file
-      set_fact:
-        json_data: "{{ meta_json_content | from_json }}"
-
-    - name: deployARSBackend | Set facts for ARS Backend Meta Data
-      set_fact:
-        appName: "{{ json_data['product'] }}"
-        distributionFileName: "{{ json_data['distributionFileName'] }}"
-        lastBuildDate: "{{ json_data['buildTime'] }}"
-        distributionVersion: "{{ json_data['version'] }}"
-
-    - name: deployARSBackend | Output meta
-      debug:
-        msg: "{{ appName }}, {{ distributionFileName }}, {{ lastBuildDate }}, {{ distributionVersion }}"
-      tags: find_meta
-
-    - name: deployARSBackend | Get the username running the deploy
-      command: whoami
-      delegate_to: localhost
-      register: username_on_the_host
-      changed_when: False
-      become: no
-      tags:
-        - find_manifest
-
-    - name: deployARSBackend | Verify {{ ars_backend_health_route }} is accessible
-      uri:
-        url: "http://localhost:{{ ars_api_port }}{{ ars_backend_health_route }}"
-        status_code: 200
-        validate_certs: false
-        return_content: yes
-        timeout: 15
-      until: appup.status == 200
-      retries: 30
-      delay: 5
-      register: appup
-      tags: find_manifest
-
-    - name: deployARSBackend | Show status of health check
-      debug:
-        var: appup.content
-
-    - name: deployARSBackend | Collect results of content returned
-      set_fact:
-        app_running: "{{ appup.content | regex_replace('^.*<p>(.*)</p>.*', '\\1') }}"
-        line_items: "{{ appup.content | regex_replace('^.*<ul>(.*)</ul>.*', '\\1') | replace('<li>', '\n')| replace('</li>', '') }}"
-
-#############################################################################
-### the following tasks are just to support logging our actual deployment ###
-#############################################################################
-    - name: deployARSBackend | Ensure logging for server exists
-      file:
-        path: "{{ item.src }}"
-        state: directory
-        owner: root
-        group: root
-        mode: 0755
-      with_items:
-        - { src: /var/log/deployments }
-
-    - name: deployARSBackend | Update server deployment history
-      lineinfile:
-        dest: "/var/log/deployments/{{ app_name }}_{{ env }}_deploymentHistory.log"
-        line: >
-          "{{ date_string }},
-          {{ username_on_the_host.stdout }},
-          {{ appName }},
-          {{ distributionVersion }},
-          {{ distributionFileName }}"
-        create: yes
-        insertafter: EOF
-        state: present
-        mode: 0755
-      tags: find_manifest
-
-    - name: deployARSBackend | Setup Crontab
-      ansible.builtin.include_tasks: ../tasks/configureCrontab.yml
-      vars:
-        application: "{{ app_name }}"
-        crontab_entries: "{{ backend_crontab_entries }}"
-
-    - name: deployARSBackend | Send Email to users
-      community.general.mail:
-        subject: "Deployment completed for ARS Backend {{ env | upper }}"
-        body: "{{ lookup('template', '../templates/ars/deployment_notification_body.j2') }}"
-        from: jenkins@{{ inventory_hostname }} (AWS Automation)
-        to: "{{ ars_be_notification_list }}"
-        cc:
-          - "{{ default_reply_email }}"
-        headers:
-          - Reply-To="{{ default_reply_email }}"
-          - X-Special="Notification for deployment"
-        subtype: html
-      vars:
-        paragraph1: "Deployment env: {{ friendly_env }}"
-        paragraph2: |
-           APP NAME : {{ appName }}<br>
-           Deployed Date : {{ date_string }}<br>
-           Last Build Date : {{ lastBuildDate }}<br>
-           Distribution Version : {{ distributionVersion }}<br>
-           Distribution File Deployed : {{ distributionFileName }}<br>
-           {{ appup.content }}<br>
-      failed_when: false
-
-  handlers:
-    - name: restart_tomcat
-      systemd:
-        name: tomcat
-        state: restarted
-        daemon_reload: yes
-      register: tomcat_status
-
-    - name: reload_mount
-      ansible.builtin.shell: |
-        fusermount -uz {{ s3_mount_root }}/ars;
-        mount -a;
-      tags:
-        - skip_ansible_lint
-
-    - name: get_cwagent_status
-      ansible.builtin.command: >
-        {{ aws_cwagent_install_path }}/bin/{{ aws_cwagent_package }}-ctl
-        -m ec2
-        -a status
-      register: cwagent_status
-      failed_when: >
-        cwagent_status.rc > 0 or
-        'running' not in cwagent_status.stdout
-      notify: print_cwagent_status
-
-    - name: print_cwagent_status
-      ansible.builtin.debug:
-        msg: "{{ cwagent_status.stdout }}"
-      when:
-        - cwagent_status.stdout is defined
-        - cwagent_status.stdout | length > 0
+java:366) ~[spring-orm-6.2.4.jar:6.2.4]
+                at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.invokeInitMethods(AbstractAutowireCapableBeanFactory.java:1859) ~[spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.initializeBean(AbstractAutowireCapableBeanFactory.java:1808) ~[spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.doCreateBean(AbstractAutowireCapableBeanFactory.java:601) ~[spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.createBean(AbstractAutowireCapableBeanFactory.java:523) ~[spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.beans.factory.support.AbstractBeanFactory.lambda$doGetBean$0(AbstractBeanFactory.java:339) ~[spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.beans.factory.support.DefaultSingletonBeanRegistry.getSingleton(DefaultSingletonBeanRegistry.java:347) [spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.beans.factory.support.AbstractBeanFactory.doGetBean(AbstractBeanFactory.java:337) [spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.beans.factory.support.AbstractBeanFactory.getBean(AbstractBeanFactory.java:207) [spring-beans-6.2.5.jar:6.2.5]
+                at org.springframework.context.support.AbstractApplicationContext.finishBeanFactoryInitialization(AbstractApplicationContext.java:970) [spring-context-6.2.5.jar:6.2.5]
+                at org.springframework.context.support.AbstractApplicationContext.refresh(AbstractApplicationContext.java:627) [spring-context-6.2.5.jar:6.2.5]
+                at org.springframework.web.context.ContextLoader.configureAndRefreshWebApplicationContext(ContextLoader.java:394) [spring-web-6.2.5.jar:6.2.5]
+                at org.springframework.web.context.ContextLoader.initWebApplicationContext(ContextLoader.java:274) [spring-web-6.2.5.jar:6.2.5]
+                at org.springframework.web.context.ContextLoaderListener.contextInitialized(ContextLoaderListener.java:126) [spring-web-6.2.5.jar:6.2.5]
+                at org.apache.catalina.core.StandardContext.listenerStart(StandardContext.java:4013) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.StandardContext.startInternal(StandardContext.java:4438) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.start(LifecycleBase.java:164) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.ContainerBase.addChild(ContainerBase.java:566) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.StandardHost.addChild(StandardHost.java:652) [catalina.jar:11.0.6]
+                at org.apache.catalina.startup.HostConfig.deployDescriptor(HostConfig.java:593) [catalina.jar:11.0.6]
+                at org.apache.catalina.startup.HostConfig$DeployDescriptor.run(HostConfig.java:1831) [catalina.jar:11.0.6]
+                at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:572) [?:?]
+                at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:317) [?:?]
+                at org.apache.tomcat.util.threads.InlineExecutorService.execute(InlineExecutorService.java:75) [tomcat-util.jar:11.0.6]
+                at java.base/java.util.concurrent.AbstractExecutorService.submit(AbstractExecutorService.java:123) [?:?]
+                at org.apache.catalina.startup.HostConfig.deployDescriptors(HostConfig.java:488) [catalina.jar:11.0.6]
+                at org.apache.catalina.startup.HostConfig.deployApps(HostConfig.java:379) [catalina.jar:11.0.6]
+                at org.apache.catalina.startup.HostConfig.start(HostConfig.java:1581) [catalina.jar:11.0.6]
+                at org.apache.catalina.startup.HostConfig.lifecycleEvent(HostConfig.java:265) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.fireLifecycleEvent(LifecycleBase.java:109) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.setStateInternal(LifecycleBase.java:389) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.setState(LifecycleBase.java:336) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.ContainerBase.startInternal(ContainerBase.java:743) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.StandardHost.startInternal(StandardHost.java:769) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.start(LifecycleBase.java:164) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.ContainerBase$StartChild.call(ContainerBase.java:1164) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.ContainerBase$StartChild.call(ContainerBase.java:1160) [catalina.jar:11.0.6]
+                at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:317) [?:?]
+                at org.apache.tomcat.util.threads.InlineExecutorService.execute(InlineExecutorService.java:75) [tomcat-util.jar:11.0.6]
+                at java.base/java.util.concurrent.AbstractExecutorService.submit(AbstractExecutorService.java:145) [?:?]
+                at org.apache.catalina.core.ContainerBase.startInternal(ContainerBase.java:716) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.StandardEngine.startInternal(StandardEngine.java:203) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.start(LifecycleBase.java:164) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.StandardService.startInternal(StandardService.java:412) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.start(LifecycleBase.java:164) [catalina.jar:11.0.6]
+                at org.apache.catalina.core.StandardServer.startInternal(StandardServer.java:866) [catalina.jar:11.0.6]
+                at org.apache.catalina.util.LifecycleBase.start(LifecycleBase.java:164) [catalina.jar:11.0.6]
+                at org.apache.catalina.startup.Catalina.start(Catalina.java:759) [catalina.jar:11.0.6]
+                at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103) ~[?:?]
+                at java.base/java.lang.reflect.Method.invoke(Method.java:580) ~[?:?]
+                at org.apache.catalina.startup.Bootstrap.start(Bootstrap.java:342) [bootstrap.jar:11.0.6]
+                at org.apache.catalina.startup.Bootstrap.main(Bootstrap.java:473) [bootstrap.jar:11.0.6]
+29-Apr-2025 16:14:42.788 SEVERE [main] org.apache.catalina.core.StandardContext.startInternal One or more listeners failed to start. Full details will be found in the appropriate container log file
+29-Apr-2025 16:14:42.792 SEVERE [main] org.apache.catalina.core.StandardContext.startInternal Context [/ars] startup failed due to previous errors
+29-Apr-2025 16:14:43.114 WARNING [main] org.apache.catalina.loader.WebappClassLoaderBase.clearReferencesJdbc The web application [ars] registered the JDBC driver [oracle.jdbc.OracleDriver] but failed to unregister it when the web application was stopped. To prevent a memory leak, the JDBC Driver has been forcibly unregistered.
+29-Apr-2025 16:14:43.115 WARNING [main] org.apache.catalina.loader.WebappClassLoaderBase.clearReferencesThreads The web application [ars] appears to have started a thread named [oracle.jdbc.diagnostics.Diagnostic.CLOCK] but has failed to stop it. This is very likely to create a memory leak. Stack trace of thread:
+ java.base/java.lang.Object.wait0(Native Method)
+ java.base/java.lang.Object.wait(Object.java:366)
+ java.base/java.util.TimerThread.mainLoop(Timer.java:563)
+ java.base/java.util.TimerThread.run(Timer.java:516)
+29-Apr-2025 16:14:43.231 INFO [main] org.apache.catalina.startup.HostConfig.deployDescriptor Deployment of deployment descriptor [/opt/tomcat/apache-tomcat-11.0.6/conf/Catalina/localhost/ars.xml] has finished in [102,426] ms
+29-Apr-2025 16:14:43.235 INFO [main] org.apache.catalina.startup.HostConfig.deployDirectory Deploying web application directory [/opt/tomcat/apache-tomcat-11.0.6/webapps/errorpages]
+29-Apr-2025 16:14:44.661 INFO [main] org.apache.jasper.servlet.TldScanner.scanJars At least one JAR was scanned for TLDs yet contained no TLDs.Enable debug logging for this logger for a complete list of JARs that were scanned but no TLDs were found in them. Skipping unneeded JARs during scanning can improve startup time and JSP compilation time.
+29-Apr-2025 16:14:45.037 INFO [main] org.apache.catalina.startup.HostConfig.deployDirectory Deployment of web application directory [/opt/tomcat/apache-tomcat-11.0.6/webapps/errorpages] has finished in [1,803] ms
+29-Apr-2025 16:14:45.058 INFO [main] org.apache.coyote.AbstractProtocol.start Starting ProtocolHandler ["http-nio-0.0.0.0-8080"]
+29-Apr-2025 16:14:45.284 INFO [main] org.apache.catalina.startup.Catalina.start Server startup in [105166] milliseconds
