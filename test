@@ -1,21 +1,11 @@
-#Ansible: s3_mount_check
-*/30 * * * * root /opt/EDIGateway/bin/edigw-checkmounts.sh
-#Ansible: edigw_log_archival
-0 0 1 * * root /opt/EDIGateway/bin/edigw-archive-logfiles.sh
-#Ansible: vaccnnc_processing
-3-59/5 * * * * vaccnnc /opt/EDIGateway/bin/edigw-vaccnnc.sh
-#Ansible: vaclaimsxm_processing
-2-59/5 * * * * vaclaimsxm /opt/EDIGateway/bin/edigw-vaclaimsxm.sh
-#Ansible: vaclaimsxm_pre277ca_processing
-*/5 * * * * vaclaimsxm /opt/EDIGateway/bin/edigw-pre277ca.sh
-#Ansible: vacpe_processing
-10,40 * * * * vacpe /opt/EDIGateway/bin/edigw-vacpe.sh
-#Ansible: vafms_processing
-16,46 * * * * vafms /opt/EDIGateway/bin/edigw-vafms.sh
-#Ansible: vapit_processing
-25,55 * * * * vapit /opt/EDIGateway/bin/edigw-vapit.sh
-#Ansible: varxclaim_processing
-*/5 * * * * varxclaim /opt/EDIGateway/bin/edigw-varxclaim.sh
-#Ansible: vaccrs_processing
-5,10,15 9 * * * vaccrs /opt/EDIGateway/bin/edigw-vaccrs.sh
-
+Rule Name	Enable/Disable	Schedule UTC	Schedule EST	English Format EST	Target	Target Type	Purpose
+s3_mount_check	1	*/30 * * * *	*/30 * * * *	Every 30 minutes	/opt/EDIGateway/bin/edigw-checkmounts.sh	Shell Script	Check S3 mounts
+edigw_log_archival	1	0 0 1 * *	0 19 last day of month * *	At midnight on the 1st day of each month	/opt/EDIGateway/bin/edigw-archive-logfiles.sh	Shell Script	Archive EDI Gateway log files monthly
+vaccnnc_processing	1	3-59/5 * * * *	3-59/5 * * * *	Every 5 minutes starting at 3 minutes past the hour	/opt/EDIGateway/bin/edigw-vaccnnc.sh	Shell Script	Process VACCNNC transactions
+vaclaimsxm_processing	1	2-59/5 * * * *	2-59/5 * * * *	Every 5 minutes starting at 2 minutes past the hour	/opt/EDIGateway/bin/edigw-vaclaimsxm.sh	Shell Script	Process VACLAIMSXM transactions
+vaclaimsxm_pre277ca_processing	1	*/5 * * * *	*/5 * * * *	Every 5 minutes	/opt/EDIGateway/bin/edigw-pre277ca.sh	Shell Script	Process VACLAIMSXM pre-277CA files
+vacpe_processing	1	10,40 * * * *	10,40 * * * *	At 10 and 40 minutes past every hour	/opt/EDIGateway/bin/edigw-vacpe.sh	Shell Script	Process VACPE transactions
+vafms_processing	1	16,46 * * * *	16,46 * * * *	At 16 and 46 minutes past every hour	/opt/EDIGateway/bin/edigw-vafms.sh	Shell Script	Process VAFMS transactions
+vapit_processing	1	25,55 * * * *	25,55 * * * *	At 25 and 55 minutes past every hour	/opt/EDIGateway/bin/edigw-vapit.sh	Shell Script	Process VAPIT transactions
+varxclaim_processing	1	*/5 * * * *	*/5 * * * *	Every 5 minutes	/opt/EDIGateway/bin/edigw-varxclaim.sh	Shell Script	Process VARXCLAIM transactions
+vaccrs_processing	1	5,10,15 9 * * *	5,10,15 4 * * *	At 5, 10, and 15 minutes past 4 AM EST (9 UTC)	/opt/EDIGateway/bin/edigw-vaccrs.sh	Shell Script	Process VACCRS transactions
