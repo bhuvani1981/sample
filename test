@@ -1,1 +1,21 @@
+#Ansible: s3_mount_check
+*/30 * * * * root /opt/EDIGateway/bin/edigw-checkmounts.sh
+#Ansible: edigw_log_archival
+0 0 1 * * root /opt/EDIGateway/bin/edigw-archive-logfiles.sh
+#Ansible: vaccnnc_processing
+3-59/5 * * * * vaccnnc /opt/EDIGateway/bin/edigw-vaccnnc.sh
+#Ansible: vaclaimsxm_processing
+2-59/5 * * * * vaclaimsxm /opt/EDIGateway/bin/edigw-vaclaimsxm.sh
+#Ansible: vaclaimsxm_pre277ca_processing
+*/5 * * * * vaclaimsxm /opt/EDIGateway/bin/edigw-pre277ca.sh
+#Ansible: vacpe_processing
+10,40 * * * * vacpe /opt/EDIGateway/bin/edigw-vacpe.sh
+#Ansible: vafms_processing
+16,46 * * * * vafms /opt/EDIGateway/bin/edigw-vafms.sh
+#Ansible: vapit_processing
+25,55 * * * * vapit /opt/EDIGateway/bin/edigw-vapit.sh
+#Ansible: varxclaim_processing
+*/5 * * * * varxclaim /opt/EDIGateway/bin/edigw-varxclaim.sh
+#Ansible: vaccrs_processing
+5,10,15 9 * * * vaccrs /opt/EDIGateway/bin/edigw-vaccrs.sh
 
