@@ -1,1 +1,48 @@
-
+Rule Name	Enable/Disable	Schedule UTC	Schedule EST	English Format EST	Target	Target Type	Purpose
+prod-270-rehydrator-event-rule		0 11-21/3 ? * SAT,SUN *	0 6-16/3 ? * SAT,SUN *	Every 3 hours from 6:00 AM to 4:00 PM on Saturday and Sunday	prod-270-rehydrator-flow	Step Functions	Process 270 transaction rehydration on weekends
+prod-834-accumulator-back-record-rule		30 14 * * ? *	30 9 * * ? *	9:30 AM daily	prod-834-accumulator-back-record-flow	Step Functions	Process 834 accumulator back records
+prod-834-accumulator-delta-create-event-rule		5 15 * * ? *	5 10 * * ? *	10:05 AM daily	prod-834-accumulator-delta-create	Step Functions	Create 834 accumulator delta records
+prod-835-extract-event-rule		0 15 * * ? *	0 10 * * ? *	10:00 AM daily	prod-835-extract-flow	Step Functions	Extract 835 data
+prod-8pdl-event-rule		30 6 * * ? *	30 1 * * ? *	1:30 AM daily	prod-8pdl-flow	Step Functions	Process 8PDL flow
+prod-paidclaims-event-rule		1 4 ? * * *	1 23 ? * * *	11:01 PM daily (previous day)	prod-paidclaims-flow	Step Functions	Process paid claims
+prod-remediation-event-rule		0/20 * * * ? *	0/20 * * * ? *	Every 20 minutes	prod-remediation-flow	Step Functions	Perform remediation tasks
+project-ped-prod-270-pyth-restartecsservicetaskspr		0 4 ? * SUN *	0 23 ? * SAT *	11:00 PM on Saturday	project-ped-270-task-restart-prod	Lambda function	Restart 270 ECS service tasks weekly
+project-ped-prod-277-pyth-filenotreceived277CA8021		00 03 ? * TUES-FRI *	00 22 ? * MON-THU *	10:00 PM Monday through Thursday	project-ped-277-80214-not-received-from-cxm-prod	Lambda function	Check for missing 277 files from CXM
+project-ped-prod-837-pyth-filenotreceivedd83784147		50 08 * * ? *	50 03 * * ? *	3:50 AM daily	project-ped-d837-84147-not-received-from-chh-prod	Lambda function	Check for missing D837 files from CHH
+project-ped-prod-837-pyth-filenotreceived999incomi		00 01 * * ? *	00 20 * * ? *	8:00 PM daily (previous day)	project-ped-999-incoming-from-cxm-prod	Lambda function	Check for missing 999 incoming files from CXM
+project-ped-prod-837-pyth-filenotready837P84146VFM		40 04 * * ? *	40 23 * * ? *	11:40 PM daily (previous day)	project-ped-837P-84146-VFMP-to-pit-not-ready-prod	Lambda function	Check if 837P files are not ready for PIT
+project-ped-prod-837-pyth-filenotready837P80214VFM		25 11 ? * TUE-FRI *	25 06 ? * TUE-FRI *	6:25 AM Tuesday through Friday	project-ped-837P-80214-VFMP-to-pit-not-ready-prod	Lambda function	Check if 837P 80214 files are not ready for PIT
+project-ped-prod-837-pyth-filenotready837I84146VFM		10 04 * * ? *	10 23 * * ? *	11:10 PM daily (previous day)	project-ped-837I-84146-VFMP-to-pit-not-ready-prod	Lambda function	Check if 837I files are not ready for PIT
+project-ped-prod-837-pyth-filenotready837I80214VFM		30 10 ? * TUE-FRI *	30 05 ? * TUE-FRI *	5:30 AM Tuesday through Friday	project-ped-837I-80214-VFMP-to-pit-not-ready-prod	Lambda function	Check if 837I 80214 files are not ready for PIT
+project-ped-prod-837-pyth-filenotready837D84147VFM		10 10 * * ? *	10 05 * * ? *	5:10 AM daily	project-ped-837D-84147-VFMP-to-pit-not-ready-prod	Lambda function	Check if 837D files are not ready for PIT
+project-ped-prod-837-pyth-eprsto837filetransferpro		*/10 * * * ? *	*/10 * * * ? *	Every 10 minutes	project-ped-eprs-to-837-file-transfer-prod	Lambda function	Transfer EPRS to 837 files
+project-ped-prod-837-pyth-ccnnctochc837999passthro		*/10 * * * ? *	*/10 * * * ? *	Every 10 minutes	project-ped-ccnnc-to-chc-837-999-passthrough-prod	Lambda function	Pass through CCNNC to CHC 837/999 files
+project-ped-prod-835-pyth-filenotreceived835Hfromc		00 16 ? * MON-FRI *	00 11 ? * MON-FRI *	11:00 AM Monday through Friday	project-ped-835H-not-received-from-cxm-prod	Lambda function	Check for missing 835H files from CXM
+project-ped-prod-835-pyth-filenotreceived835Gfromc		00 16 ? * MON-FRI *	00 11 ? * MON-FRI *	11:00 AM Monday through Friday	project-ped-835G-not-received-from-cxm-prod	Lambda function	Check for missing 835G files from CXM
+project-ped-prod-835-pyth-filenotreceived835Efromc		00 16 ? * MON-FRI *	00 11 ? * MON-FRI *	11:00 AM Monday through Friday	project-ped-835E-not-received-from-cxm-prod	Lambda function	Check for missing 835E files from CXM
+project-ped-prod-835-pyth-eprsto835filetransferpro		*/10 * * * ? *	*/10 * * * ? *	Every 10 minutes	project-ped-eprs-to-835-file-transfer-prod	Lambda function	Transfer EPRS to 835 files
+project-ped-prod-835-pyth-chctoccnnc835999passthro		*/10 * * * ? *	*/10 * * * ? *	Every 10 minutes	project-ped-chc-to-ccnnc-835-999-passthrough-prod	Lambda function	Pass through CHC to CCNNC 835/999 files
+project-ped-prod-834-pyth-memberplusfilenotreceive		00 13 ? * MON-FRI *	00 08 ? * MON-FRI *	8:00 AM Monday through Friday	project-ped-memberplus-not-received-prod	Lambda function	Check for missing member plus files
+project-ped-prod-834-pyth-filenotcreated834prodRul		40 13 ? * MON-FRI *	40 08 ? * MON-FRI *	8:40 AM Monday through Friday	project-ped-834-to-cxm-from-edi-not-created-prod	Lambda function	Check if 834 files to CXM from EDI are not created
+project-ped-prod-834-pyth-eligibilityplustocpeprod		55 6 ? * * *	55 1 ? * * *	1:55 AM daily	project-ped-eligibility-plus-prod	Lambda function	Process eligibility plus to CPE
+project-ped-prod-834-pyth-cxm999filenotreceivedpro		00 14 ? * MON-FRI *	00 09 ? * MON-FRI *	9:00 AM Monday through Friday	project-ped-cxm-834-999-not-received-prod	Lambda function	Check for missing CXM 834/999 files
+project-ped-prod-834-pyth-accumulatorstocpefromedi		20 06 ? * MON-FRI *	20 01 ? * MON-FRI *	1:20 AM Monday through Friday	project-ped-834-accumulators-to-cpe-from-edi-prod	Lambda function	Process 834 accumulators to CPE from EDI
+project-ped-sor-memberplus-sqs-prod		BucketName: prod-vfmp-member Prefix:cpe-historical-memberplus	BucketName: prod-vfmp-member Prefix:cpe-historical-memberplus	On file arrival	project-ped-prod-sor-memberplus-incoming.fifo	SQS queue	Process member plus SQS messages
+project-ped-prod-837-pyth-filenotreceivedh83784146		00 03 * * ? *	00 22 * * ? *	10:00 PM daily (previous day)	project-ped-h837-84146-not-received-from-chh-prod	Lambda function	Check for missing H837 files from CHH
+project-ped-prod-837-pyth-filenotreceivedm83784146		20 03 * * ? *	20 22 * * ? *	10:20 PM daily (previous day)	project-ped-m837-84146-not-received-from-chh-prod	Lambda function	Check for missing M837 files from CHH
+project-ped-prod-837-pyth-filenotreceivedPMCO80214-		20 10 ? * TUE-FRI *	20 05 ? * TUE-FRI *	5:20 AM Tuesday through Friday	project-ped-PMCO-80214-5010I-not-received-from-chh-prod	Lambda function	Check for missing PMCO 5010I files from CHH
+project-ped-prod-837-pyth-filenotreceivedPMCO80214		50 10 ? * TUE-FRI *	50 05 ? * TUE-FRI *	5:50 AM Tuesday through Friday	project-ped-PMCO-80214-5010P-not-received-from-chh-prod	Lambda function	Check for missing PMCO 5010P files from CHH
+project-ped-prod-837-pyth-getcodesfromcdcprodRuleB		0 12 * * ? *	0 07 * * ? *	7:00 AM daily	project-ped-get-codes-from-cdc-prod	Lambda function	Get codes from CDC
+project-ped-prod-deployment-failed-notification				On event	prod-deployment-failed	SNS topic	Notify when deployment fails
+project-ped-prod-deployment-succeeded-notification				On event	prod-deployment-succeeded	SNS topic	Notify when deployment succeeds
+project-ped-prod-ec2-stopped-notification				On event	prod-ec2-stopped-notification	SNS topic	Notify when EC2 instances stop
+project-ped-prod-ecs-270-task-stopped-notification				On event	prod-ecs-270-task-stopped	SNS topic	Notify when ECS 270 tasks stop
+project-ped-prod-fms-tran-cpetofmpprodRuleA5FAC913		0/15 * * * ? *	0/15 * * * ? *	Every 15 minutes	project-ped-cpe-to-fmp-prod	Lambda function	Transfer from CPE to FMP
+project-ped-prod-fms-tran-cpetofmsprodRuleB4F5CB3E		0/15 * * * ? *	0/15 * * * ? *	Every 15 minutes	project-ped-cpe-to-fms-prod	Lambda function	Transfer from CPE to FMS
+project-ped-prod-fms-tran-cxmtofmsprodRule18C9FF36		0/15 * * * ? *	0/15 * * * ? *	Every 15 minutes	project-ped-cxm-to-fms-prod	Lambda function	Transfer from CXM to FMS
+project-ped-prod-fms-tran-transferfromfmsprodRule1		0/15 * * * ? *	0/15 * * * ? *	Every 15 minutes	project-ped-transfer-from-fms-prod	Lambda function	Transfer from FMS
+project-ped-prod-move-ars-ars275999tochhprodRule85		*/10 * ? * MON-FRI *	*/10 * ? * MON-FRI *	Every 10 minutes Monday through Friday	project-ped-ars-275-999-to-chh-outgoing-prod	Lambda function	Move ARS 275/999 files to CHH
+project-ped-prod-move-ars-ars277cacstattochhprodRu		*/10 * ? * MON-FRI *	*/10 * ? * MON-FRI *	Every 10 minutes Monday through Friday	project-ped-ars-277ca-cstat-to-chh-outgoing-prod	Lambda function	Move ARS 277CA CSTAT files to CHH
+project-ped-prod-rds-availability-notification				On event	prod-rds-availability	SNS topic	Notify about RDS availability issues
+project-ped-prod-rds-failover-notification				On event	prod-rds-failover	SNS topic	Notify about RDS failover events
+project-ped-prod-s3invent-getdailyreportfroms3inve		0 15 * * ? *	0 10 * * ? *	10:00 AM daily	project-ped-get-daily-report-from-s3inventory-prod	Lambda function	Get S3 inventory daily report
