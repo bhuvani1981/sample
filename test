@@ -1,4 +1,4 @@
-Rule Name		Schedule	Event Pattern	Target Type		Target Name
+Rule Name		Schedule	Event Pattern	Target 	Target Type
 prod-270-rehydrator-event-rule		0 11-21/3 ? * SAT,SUN *		prod-270-rehydrator-flow		Step Functions
 prod-834-accumulator-back-record-rule		30 14 * * ? *		prod-834-accumulator-back-record-flow		Step Functions
 prod-834-accumulator-delta-create-event-rule		5 15 * * ? *		prod-834-accumulator-delta-create		Step Functions
