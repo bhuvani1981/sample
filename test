@@ -1,11 +1,141 @@
-Rule Name	Enable/Disable	Schedule UTC	Schedule EST	English Format EST	Target	Target Type	Purpose
-s3_mount_check	1	*/30 * * * *	*/30 * * * *	Every 30 minutes	/opt/EDIGateway/bin/edigw-checkmounts.sh	Shell Script	Check S3 mounts
-edigw_log_archival	1	0 0 1 * *	0 19 last day of month * *	At midnight on the 1st day of each month	/opt/EDIGateway/bin/edigw-archive-logfiles.sh	Shell Script	Archive EDI Gateway log files monthly
-vaccnnc_processing	1	3-59/5 * * * *	3-59/5 * * * *	Every 5 minutes starting at 3 minutes past the hour	/opt/EDIGateway/bin/edigw-vaccnnc.sh	Shell Script	Process VACCNNC transactions
-vaclaimsxm_processing	1	2-59/5 * * * *	2-59/5 * * * *	Every 5 minutes starting at 2 minutes past the hour	/opt/EDIGateway/bin/edigw-vaclaimsxm.sh	Shell Script	Process VACLAIMSXM transactions
-vaclaimsxm_pre277ca_processing	1	*/5 * * * *	*/5 * * * *	Every 5 minutes	/opt/EDIGateway/bin/edigw-pre277ca.sh	Shell Script	Process VACLAIMSXM pre-277CA files
-vacpe_processing	1	10,40 * * * *	10,40 * * * *	At 10 and 40 minutes past every hour	/opt/EDIGateway/bin/edigw-vacpe.sh	Shell Script	Process VACPE transactions
-vafms_processing	1	16,46 * * * *	16,46 * * * *	At 16 and 46 minutes past every hour	/opt/EDIGateway/bin/edigw-vafms.sh	Shell Script	Process VAFMS transactions
-vapit_processing	1	25,55 * * * *	25,55 * * * *	At 25 and 55 minutes past every hour	/opt/EDIGateway/bin/edigw-vapit.sh	Shell Script	Process VAPIT transactions
-varxclaim_processing	1	*/5 * * * *	*/5 * * * *	Every 5 minutes	/opt/EDIGateway/bin/edigw-varxclaim.sh	Shell Script	Process VARXCLAIM transactions
-vaccrs_processing	1	5,10,15 9 * * *	5,10,15 4 * * *	At 5, 10, and 15 minutes past 4 AM EST (9 UTC)	/opt/EDIGateway/bin/edigw-vaccrs.sh	Shell Script	Process VACCRS transactions
+---
+- name: Test | Clone build artifact repo
+  hosts: "{{ var_hosts }}"
+  become: true
+
+  roles:
+    - ansible-role-awscli
+  vars:
+    github_repo_name: "fpps-build-artifacts"
+    destination_directory: "/opt/tmp"
+    build_user: "{{ lookup('ansible.builtin.env', 'BUILDUSER') }}"
+    build_token: "{{ lookup('ansible.builtin.env', 'BUILDTOKEN') }}"
+  pre_tasks:
+    - name: promoteBuildArtifact | Include all files in vars
+      include_vars:
+        dir: ../vars/fpps-defaults
+        extensions:
+          - yml
+
+    - name: promoteBuildArtifact | Include playbook pre tasks
+      include_tasks: ../tasks/playbookPreTasks.yml
+
+  tasks:
+    - name: promoteBuildArtifact | Reset no log if verbosity is high enough
+      ansible.builtin.set_fact:
+        no_log_value: false
+      when: ansible_verbosity >= 3
+
+    - name: promoteBuildArtifact | Set facts for checkout
+      ansible.builtin.set_fact:
+        destination_repo: "https://{{ build_user }}:{{ build_token }}@github.com/department-of-veterans-affairs/{{ github_repo_name }}"
+
+    - name: promoteBuildArtifact | Set default facts
+      set_fact:
+        files_to_release: "{{ lookup('ansible.builtin.env', 'files_to_release') }}"
+        tag_name: "{{ lookup('ansible.builtin.env', 'tag_name') }}"
+        target_branch: "{{ lookup('ansible.builtin.env', 'target_branch') }}"
+
+    - name: promoteBuildArtifact | Create dir to clone
+      ansible.builtin.file:
+        path: "{{ destination_directory }}"
+        state: directory
+        mode: 0750
+
+    - name: promoteBuildArtifact | Ensure destination directory exists
+      ansible.builtin.file:
+        path: "{{ destination_directory }}/{{ github_repo_name }}"
+        state: directory
+        mode: '0750'
+
+    - name: promoteBuildArtifact | Initialize and checkout target branch
+      ansible.builtin.shell: |
+        git init
+        git remote add origin {{ destination_repo }} 2>/dev/null || true
+        git fetch origin
+        git checkout -f $(git rev-parse --verify origin/master 2>/dev/null || \
+                          git rev-parse --verify origin/main 2>/dev/null || echo "HEAD")
+        git branch -D {{ target_branch }} 2>/dev/null || true
+        git checkout -b {{ target_branch }} || git checkout {{ target_branch }}
+        git fetch --tags
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      tags: skip_ansible_lint
+
+    - name: promoteBuildArtifact | Fetch all git tags
+      ansible.builtin.command: git tag
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      register: git_tags
+      changed_when: false
+      tags: skip_ansible_lint
+
+    - name: promoteBuildArtifact | Set default candidate number and tag list
+      ansible.builtin.set_fact:
+        candidate_number: 1
+        matching_tags: []
+
+    - name: promoteBuildArtifact | Find matching candidate tags
+      ansible.builtin.set_fact:
+        matching_tags: "{{ git_tags.stdout_lines | select('search', tag_name + '_candidate\\d+') | list }}"
+      when: app_env == 'prep' and git_tags.stdout_lines | length > 0
+
+    - name: promoteBuildArtifact | Calculate next candidate number if tags found
+      when: app_env == 'prep'
+      block:
+        - name: promoteBuildArtifact | Extract candidate numbers from tags
+          ansible.builtin.set_fact:
+            candidate_numbers: "{{ matching_tags | map('regex_search', '_candidate(\\d+)', '\\1') | select('string') | map('int') | list }}"
+          when: matching_tags | length > 0
+
+        - name: promoteBuildArtifact | Increment candidate number
+          ansible.builtin.set_fact:
+            candidate_number: "{{ candidate_numbers | max + 1 }}"
+          when: candidate_numbers is defined and candidate_numbers | length > 0
+
+    - name: promoteBuildArtifact | Set candidate suffix and release tag
+      ansible.builtin.set_fact:
+        candidate_suffix: "{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
+        release_tag: "{{ tag_name }}{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
+
+    - name: promoteBuildArtifact | Show calculated tag details
+      ansible.builtin.debug:
+        msg:
+          - "tag_name: {{ tag_name }}"
+          - "candidate_number: {{ candidate_number }}"
+          - "candidate_suffix: {{ candidate_suffix }}"
+          - "release_tag: {{ release_tag }}"
+      tags: always
+
+    - name: promoteBuildArtifact | Checkout artifacts from develop branch
+      ansible.builtin.shell: >
+        git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      loop: "{{ files_to_release }}"
+      failed_when: false
+      tags: skip_ansible_lint
+
+    - name: promoteBuildArtifact | Check if tag already exists
+      ansible.builtin.command: git tag -l {{ release_tag }}
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      register: local_tag_exists
+      changed_when: false
+      tags: skip_ansible_lint
+
+    - name: promoteBuildArtifact | Commit and tag artifacts
+      ansible.builtin.shell: |
+        cd "{{ destination_directory }}/{{ github_repo_name }}"
+        git add .
+        git_status=$(git status --porcelain)
+        if [ -n "$git_status" ]; then
+          git commit -m "fpps_promoteBuildArtifacts-{{ release_tag }}"
+        fi
+        if [ -z "$(git tag -l {{ release_tag }})" ]; then
+          git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+        fi
+        git push origin {{ target_branch }} --tags || (git fetch origin && git push origin {{ target_branch }} --tags --force)
+      register: git_push
+      failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
+      tags: skip_ansible_lint
