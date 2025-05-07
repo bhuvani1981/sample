@@ -1,1 +1,19 @@
-
+- name: promoteBuildArtifact | Commit and tag artifacts
+      ansible.builtin.shell: |
+        cd "{{ destination_directory }}/{{ github_repo_name }}"
+        {% for item in files_to_release %}
+        git add {{ item.artifact_folder }}/{{ item.filename }}
+        {% endfor %}
+        git_status=$(git status --porcelain)
+        if [ -n "$git_status" ]; then
+          git commit -m "fpps_promoteBuildArtifacts-{{ release_tag }}"
+        fi
+        if [ -z "$(git tag -l {{ release_tag }})" ]; then
+          git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+        fi
+        git push origin {{ target_branch }} --tags || (git fetch origin && git push origin {{ target_branch }} --tags --force)
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      register: git_push
+      failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
+      tags: skip_ansible_lint
