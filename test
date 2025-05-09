@@ -1,37 +1,14 @@
-- name: promoteBuildArtifact | Remove existing artifacts to force change detection
-  ansible.builtin.file:
-    path: "{{ destination_directory }}/{{ github_repo_name }}/{{ item.artifact_folder }}/{{ item.filename }}"
-    state: absent
-  loop: "{{ files_to_release }}"
-  tags: skip_ansible_lint
-
-- name: promoteBuildArtifact | Checkout artifact again from develop
-  ansible.builtin.shell: >
-    git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
-  args:
-    chdir: "{{ destination_directory }}/{{ github_repo_name }}"
-  loop: "{{ files_to_release }}"
-  tags: skip_ansible_lint
-  failed_when: false
-
-- name: promoteBuildArtifact | Commit and tag artifacts
+- name: Commit and tag artifacts
   ansible.builtin.shell: |
     cd "{{ destination_directory }}/{{ github_repo_name }}"
-    git add {{ files_to_release | map(attribute='artifact_folder') | list | unique | join(' ') }}
-    git_status=$(git status --porcelain)
-    if [ -n "$git_status" ]; then
-      git commit -m "fpps_promoteBuildArtifacts-{{ release_tag }}"
-    else
-      echo "Nothing to commit, forcing re-commit by resetting timestamp"
-      date > .recommit_trigger
-      git add .recommit_trigger
-      git commit -m "fpps_promoteBuildArtifacts-{{ release_tag }} (forced commit)"
+    git add .
+    if [ -n "$(git status --porcelain)" ]; then
+      git commit --date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" -m "Promoting artifacts for {{ release_tag }}"
     fi
     if [ -z "$(git tag -l {{ release_tag }})" ]; then
-      git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+      git tag -a {{ release_tag }} -m "Tagging artifacts with {{ release_tag }}"
     fi
-    git push origin {{ target_branch }} --tags || \
-      (git fetch origin && git push origin {{ target_branch }} --tags --force)
+    git push origin {{ target_branch }} --tags || (git fetch origin && git push origin {{ target_branch }} --tags --force)
   register: git_push
   failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
   tags: skip_ansible_lint
