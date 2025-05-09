@@ -1,122 +1,37 @@
----
-- name: Promote Build Artifacts with Sparse Checkout
-  hosts: "{{ var_hosts }}"
-  become: true
+- name: promoteBuildArtifact | Remove existing artifacts to force change detection
+  ansible.builtin.file:
+    path: "{{ destination_directory }}/{{ github_repo_name }}/{{ item.artifact_folder }}/{{ item.filename }}"
+    state: absent
+  loop: "{{ files_to_release }}"
+  tags: skip_ansible_lint
 
-  roles:
-    - ansible-role-awscli
+- name: promoteBuildArtifact | Checkout artifact again from develop
+  ansible.builtin.shell: >
+    git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
+  args:
+    chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+  loop: "{{ files_to_release }}"
+  tags: skip_ansible_lint
+  failed_when: false
 
-  vars:
-    github_repo_name: "fpps-build-artifacts"
-    destination_directory: "/opt/tmp"
-    build_user: "{{ lookup('ansible.builtin.env', 'BUILDUSER') }}"
-    build_token: "{{ lookup('ansible.builtin.env', 'BUILDTOKEN') }}"
-
-  pre_tasks:
-    - name: Include vars
-      include_vars:
-        dir: ../vars/fpps-defaults
-        extensions:
-          - yml
-
-    - name: Include playbook pre tasks
-      include_tasks: ../tasks/playbookPreTasks.yml
-
-  tasks:
-    - name: Set repository URL
-      ansible.builtin.set_fact:
-        github_repo_url: "https://{{ build_user }}:{{ build_token }}@github.com/department-of-veterans-affairs/{{ github_repo_name }}"
-
-    - name: Set release-related facts
-      ansible.builtin.set_fact:
-        files_to_release: "{{ lookup('ansible.builtin.env', 'files_to_release') }}"
-        tag_name: "{{ lookup('ansible.builtin.env', 'tag_name') }}"
-        target_branch: "{{ lookup('ansible.builtin.env', 'target_branch') }}"
-
-    - name: Create clone base dir
-      ansible.builtin.file:
-        path: "{{ destination_directory }}"
-        state: directory
-        mode: 0750
-
-    - name: Sparse checkout artifacts from develop branch
-      include_tasks: ../tasks/sparsecheckout.yml
-      loop: "{{ files_to_release }}"
-      loop_control:
-        loop_var: item
-      vars:
-        sparse_checkout: "{{ item.artifact_folder }}/{{ item.filename }}"
-        base_dir: "{{ destination_directory }}"
-        branch: "develop"
-
-    - name: Initialize repo if needed and checkout target branch
-      ansible.builtin.shell: |
-        git init
-        git remote add origin {{ github_repo_url }} 2>/dev/null || true
-        git fetch origin
-        git checkout -f $(git rev-parse --verify origin/master 2>/dev/null || \
-                          git rev-parse --verify origin/main 2>/dev/null || echo "HEAD")
-        git branch -D {{ target_branch }} 2>/dev/null || true
-        git checkout -b {{ target_branch }} || git checkout {{ target_branch }}
-        git fetch --tags
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
-      tags: skip_ansible_lint
-
-    - name: Fetch tags to find candidate numbers
-      ansible.builtin.command: git tag
-      args:
-        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
-      register: git_tags
-      changed_when: false
-
-    - name: Set initial tag values
-      ansible.builtin.set_fact:
-        candidate_number: 1
-        matching_tags: []
-
-    - name: Find matching tags if in prep
-      ansible.builtin.set_fact:
-        matching_tags: "{{ git_tags.stdout_lines | select('search', tag_name + '_candidate\\d+') | list }}"
-      when: app_env == 'prep'
-
-    - name: Extract and increment candidate tag number
-      when: app_env == 'prep'
-      block:
-        - name: Extract candidate numbers
-          ansible.builtin.set_fact:
-            candidate_numbers: "{{ matching_tags | map('regex_search', '_candidate(\\d+)', '\\1') | select('string') | map('int') | list }}"
-
-        - name: Increment candidate number
-          ansible.builtin.set_fact:
-            candidate_number: "{{ candidate_numbers | max + 1 }}"
-          when: candidate_numbers | length > 0
-
-    - name: Set final tag values
-      ansible.builtin.set_fact:
-        candidate_suffix: "{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
-        release_tag: "{{ tag_name }}{{ candidate_suffix }}"
-
-    - name: Show tag info
-      debug:
-        msg:
-          - "tag_name: {{ tag_name }}"
-          - "candidate_number: {{ candidate_number }}"
-          - "candidate_suffix: {{ candidate_suffix }}"
-          - "release_tag: {{ release_tag }}"
-
-    - name: Commit and tag artifacts
-      ansible.builtin.shell: |
-        cd "{{ destination_directory }}/{{ github_repo_name }}"
-        git add .
-        if [ -n "$(git status --porcelain)" ]; then
-          git commit -m "Promoting artifacts for {{ release_tag }}"
-        fi
-        if [ -z "$(git tag -l {{ release_tag }})" ]; then
-          git tag -a {{ release_tag }} -m "Tagging artifacts with {{ release_tag }}"
-        fi
-        git push origin {{ target_branch }} --tags || (git fetch origin && git push origin {{ target_branch }} --tags --force)
-      register: git_push
-      failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
-      tags: skip_ansible_lint
-
+- name: promoteBuildArtifact | Commit and tag artifacts
+  ansible.builtin.shell: |
+    cd "{{ destination_directory }}/{{ github_repo_name }}"
+    git add {{ files_to_release | map(attribute='artifact_folder') | list | unique | join(' ') }}
+    git_status=$(git status --porcelain)
+    if [ -n "$git_status" ]; then
+      git commit -m "fpps_promoteBuildArtifacts-{{ release_tag }}"
+    else
+      echo "Nothing to commit, forcing re-commit by resetting timestamp"
+      date > .recommit_trigger
+      git add .recommit_trigger
+      git commit -m "fpps_promoteBuildArtifacts-{{ release_tag }} (forced commit)"
+    fi
+    if [ -z "$(git tag -l {{ release_tag }})" ]; then
+      git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+    fi
+    git push origin {{ target_branch }} --tags || \
+      (git fetch origin && git push origin {{ target_branch }} --tags --force)
+  register: git_push
+  failed_when: git_push.rc != 0 and 'tag already exists' not in git_push.stderr
+  tags: skip_ansible_lint
