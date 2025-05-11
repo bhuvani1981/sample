@@ -1,1 +1,166 @@
+- name: Promote | Clone and promote specific build artifacts using sparse checkout
+  hosts: "{{ var_hosts }}"
+  become: true
 
+  roles:
+    - ansible-role-awscli
+
+  vars:
+    github_repo_name: "fpps-build-artifacts"
+    destination_directory: "/opt/tmp"
+    build_user: "{{ lookup('ansible.builtin.env', 'BUILDUSER') }}"
+    build_token: "{{ lookup('ansible.builtin.env', 'BUILDTOKEN') }}"
+    commit_message: "Promoting artifacts for {{ lookup('ansible.builtin.env', 'tag_name') }} at $(date -u +%Y-%m-%d)"
+
+  pre_tasks:
+    - name: promoteBuildArtifact | Include all vars
+      include_vars:
+        dir: ../vars/fpps-defaults
+        extensions: ['yml']
+
+    - name: promoteBuildArtifact | Include playbook pre-tasks
+      include_tasks: ../tasks/playbookPreTasks.yml
+
+  tasks:
+    - name: promoteBuildArtifact | Reset no log if verbosity is high enough
+      ansible.builtin.set_fact:
+        no_log_value: false
+      when: ansible_verbosity >= 3
+
+    - name: promoteBuildArtifact | Set destination repo URL
+      ansible.builtin.set_fact:
+        destination_repo: "https://{{ build_user }}:{{ build_token }}@github.com/department-of-veterans-affairs/{{ github_repo_name }}"
+
+    - name: promoteBuildArtifact | Set default facts
+      ansible.builtin.set_fact:
+        files_to_release: "{{ lookup('ansible.builtin.env', 'files_to_release') }}"
+        tag_name: "{{ lookup('ansible.builtin.env', 'tag_name') }}"
+        target_branch: "{{ lookup('ansible.builtin.env', 'target_branch') }}"
+
+    - name: promoteBuildArtifact | Create base clone directory
+      ansible.builtin.file:
+        path: "{{ destination_directory }}"
+        state: directory
+        mode: '0750'
+
+    - name: promoteBuildArtifact | Create repo clone path
+      ansible.builtin.file:
+        path: "{{ destination_directory }}/{{ github_repo_name }}"
+        state: directory
+        mode: '0750'
+
+    # Clone repo directly with git module
+    - name: promoteBuildArtifact | Clone target repository
+      ansible.builtin.git:
+        repo: "{{ destination_repo }}"
+        dest: "{{ destination_directory }}/{{ github_repo_name }}"
+        version: "{{ target_branch }}"
+        force: yes
+
+    - name: promoteBuildArtifact | Fetch all tags
+      ansible.builtin.command: git tag
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      register: git_tags
+      changed_when: false
+      tags: skip_ansible_lint
+
+    - name: promoteBuildArtifact | Set candidate number and release tag
+      block:
+        - name: promoteBuildArtifact | Set defaults
+          ansible.builtin.set_fact:
+            candidate_number: 1
+            matching_tags: []
+
+        - name: promoteBuildArtifact | Find matching candidate tags
+          ansible.builtin.set_fact:
+            matching_tags: "{{ git_tags.stdout_lines | select('search', tag_name + '_candidate\\d+') | list }}"
+          when: app_env == 'prep' and git_tags.stdout_lines | length > 0
+
+        - name: promoteBuildArtifact | Extract and increment candidate number
+          when: app_env == 'prep' and matching_tags | length > 0
+          block:
+            - name: Extract numbers
+              ansible.builtin.set_fact:
+                candidate_numbers: "{{ matching_tags | map('regex_search', '_candidate(\\d+)', '\\1') | select('string') | map('int') | list }}"
+            - name: Increment
+              ansible.builtin.set_fact:
+                candidate_number: "{{ candidate_numbers | max + 1 }}"
+              when: candidate_numbers | length > 0
+
+        - name: promoteBuildArtifact | Finalize tag names
+          ansible.builtin.set_fact:
+            candidate_suffix: "{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
+            release_tag: "{{ tag_name }}{{ '_candidate' + (candidate_number | string) if app_env == 'prep' else '' }}"
+
+    - name: promoteBuildArtifact | Debug final tag values
+      ansible.builtin.debug:
+        msg:
+          - "Tag Name: {{ tag_name }}"
+          - "Candidate Number: {{ candidate_number }}"
+          - "Release Tag: {{ release_tag }}"
+      tags: always
+
+    - name: promoteBuildArtifact | Check if tag exists
+      ansible.builtin.command: git tag -l {{ release_tag }}
+      args:
+        chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+      register: local_tag_exists
+      changed_when: false
+      tags: skip_ansible_lint
+
+    # Group files by their directories for separate commits
+    - name: promoteBuildArtifact | Get unique artifact folders
+      ansible.builtin.set_fact:
+        artifact_folders: "{{ files_to_release | map(attribute='artifact_folder') | unique | list }}"
+
+    # Create a list of files per folder
+    - name: promoteBuildArtifact | Create files by folder mapping
+      ansible.builtin.set_fact:
+        folder_files: "{{ folder_files | default({}) | combine({item: files_to_release | selectattr('artifact_folder', 'equalto', item) | list}) }}"
+      loop: "{{ artifact_folders }}"
+
+    # For each directory, checkout and commit separately
+    - name: promoteBuildArtifact | Process each artifact folder
+      block:
+        # Checkout specific files from develop for this folder
+        - name: promoteBuildArtifact | Checkout artifacts from develop for {{ folder_name }}
+          ansible.builtin.shell: >
+            git checkout origin/develop -- {{ item.artifact_folder }}/{{ item.filename }}
+          args:
+            chdir: "{{ destination_directory }}/{{ github_repo_name }}"
+          loop: "{{ folder_files[folder_name] }}"
+          tags: skip_ansible_lint
+          
+        # Commit just this folder's specific files
+        - name: promoteBuildArtifact | Commit changes for {{ folder_name }}
+          ansible.builtin.shell: |
+            cd "{{ destination_directory }}/{{ github_repo_name }}"
+            # Add each file specifically
+            {% for file in folder_files[folder_name] %}
+            git add {{ file.artifact_folder }}/{{ file.filename }}
+            {% endfor %}
+            if [ -n "$(git status --porcelain {{ folder_name }})" ]; then
+              git commit -m "{{ commit_message }}"
+            fi
+          tags: skip_ansible_lint
+          
+        # Push after each folder's commit
+        - name: promoteBuildArtifact | Push changes
+          ansible.builtin.shell: |
+            cd "{{ destination_directory }}/{{ github_repo_name }}"
+            git push origin {{ target_branch }}
+          tags: skip_ansible_lint
+      loop: "{{ artifact_folders }}"
+      loop_control:
+        loop_var: folder_name
+
+    # Create tag after all folders are committed
+    - name: promoteBuildArtifact | Create tag
+      ansible.builtin.shell: |
+        cd "{{ destination_directory }}/{{ github_repo_name }}"
+        if [ -z "$(git tag -l {{ release_tag }})" ]; then
+          git tag -a {{ release_tag }} -m "Tagging artifacts with version {{ release_tag }}"
+          git push origin {{ release_tag }}
+        fi
+      tags: skip_ansible_lint
