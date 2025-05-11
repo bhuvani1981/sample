@@ -1,7 +1,1 @@
-# Force a change by adding a timestamp to a metadata file
-    echo "Promotion timestamp: $(date -u)" > .promotion-metadata
-    git add .promotion-metadata
-    
-    # Always commit with current timestamp
-    git commit --date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" -m "Promoting artifacts for {{ release_tag }} at $(date -u)"
-    
+
